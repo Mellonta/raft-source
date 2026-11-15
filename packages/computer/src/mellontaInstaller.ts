@@ -1,4 +1,4 @@
-// The fork's Linux releases are self-contained GitHub assets. Never bootstrap
+// The fork's native releases are self-contained GitHub assets. Never bootstrap
 // the upstream Hands installer, which can only install upstream products.
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
@@ -33,7 +33,9 @@ async function read(url: string, maximum: number): Promise<Buffer> {
 
 export async function mellontaInstallerCommand(args: string[], env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform, arch: string): Promise<{ command: string; args: string[] }> {
-  if (platform !== "linux" || !["x64", "arm64"].includes(arch)) throw new Error("Mellonta releases support Linux x86-64 and ARM64 only");
+  if (!["linux-x64", "linux-arm64", "darwin-arm64"].includes(`${platform}-${arch}`)) {
+    throw new Error("Mellonta releases support Linux x86-64 and ARM64, and Apple Silicon macOS.");
+  }
   if (args[0] !== "upgrade") throw new Error("Unsupported Mellonta installer operation");
   let version: string | undefined;
   let channel: string | undefined;

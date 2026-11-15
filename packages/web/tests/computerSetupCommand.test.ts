@@ -379,7 +379,7 @@ test("staging isolated installs use the production entry script on the alpha cha
   }
 });
 
-test("self-hosted Linux portals install their pinned fork and connect to their own server", () => {
+test("self-hosted portals give macOS and Linux the pinned fork installer and the deployment's server URL", () => {
   vi.stubEnv("VITE_MELLONTA_COMPUTER_VERSION", "1.25.0-mellonta.1");
   try {
     const result = getComputerCommands("team", "production", "http://raft.example:8001", { machineId: "m-1" });

@@ -1,4 +1,4 @@
-// Combine independently tested native builds only after validating both targets.
+// Combine independently tested native builds after validating every target.
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -10,7 +10,7 @@ export async function mergeClientArtifacts(inputs, out) {
   const nodeVersion = (await readFile(join(root, ".node-version"), "utf8")).trim();
   const files = new Map();
   const manifests = [];
-  for (const target of ["linux-x64", "linux-arm64"]) {
+  for (const target of ["linux-x64", "linux-arm64", "darwin-arm64"]) {
     const source = join(inputs, target);
     const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8"));
     if (manifest.version !== version || manifest.nodeVersion !== nodeVersion

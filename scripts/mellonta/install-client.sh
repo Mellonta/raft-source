@@ -1,5 +1,5 @@
 #!/bin/sh
-# Mellonta Linux installer, adapted from the Raft 1.13 installer (FSL-1.1-ALv2).
+# Mellonta native installer, adapted from the Raft 1.13 installer (FSL-1.1-ALv2).
 # Verifies exact GitHub release binary and WASM before replacing either file.
 # Called by setup-client.sh or the checksum-verified Computer upgrade adapter.
 # Required: --version X.Y.Z-mellonta.N (release packaging supplies the default).
@@ -100,13 +100,12 @@ elif command -v wget >/dev/null 2>&1; then
 else err "need curl or wget"; fi
 
 # --- detect platform/arch in the same tokens build.mjs emits (process.platform/arch) ---
-[ "$(uname -s)" = Linux ] || err "Mellonta releases support Linux x86-64 and ARM64 only"
-case "$(uname -m)" in
-  x86_64|amd64) ARCH=x64 ;;
-  arm64|aarch64) ARCH=arm64 ;;
-  *) err "Mellonta releases support Linux x86-64 and ARM64 only" ;;
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64|Linux-amd64) TARGET=linux-x64 ;;
+  Linux-aarch64|Linux-arm64) TARGET=linux-arm64 ;;
+  Darwin-arm64) TARGET=darwin-arm64 ;;
+  *) err "Mellonta releases support Linux x86-64 and ARM64, and Apple Silicon macOS." ;;
 esac
-TARGET="linux-$ARCH"
 
 # Compare two SemVer 2.0.0 versions without depending on Node.js or a platform
 # package manager. Prints newer/older/equal for the first argument relative to
@@ -576,12 +575,16 @@ fi
 # Check the executable format before trying the candidate's own version command.
 if command -v file >/dev/null 2>&1; then
   desc="$(file -b "$tmp/$FILE")"
-  case "$ARCH" in
-    arm64) pattern="ELF.*aarch64" ;;
-    x64) pattern="ELF.*x86-64" ;;
+  case "$TARGET" in
+    linux-arm64) pattern="ELF.*aarch64" ;;
+    linux-x64) pattern="ELF.*x86-64" ;;
+    darwin-arm64) pattern="Mach-O 64-bit executable arm64" ;;
   esac
   printf '%s' "$desc" | grep -Eq "$pattern" || err "wrong executable for $TARGET: $desc"
   info "binary platform verified ($TARGET)"
+fi
+if [ "$TARGET" = darwin-arm64 ]; then
+  codesign --verify --strict "$tmp/$FILE" || err "Invalid macOS code signature for $FILE"
 fi
 
 chmod +x "$tmp/$FILE"

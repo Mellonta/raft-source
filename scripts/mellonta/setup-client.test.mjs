@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ const version = "2.3.4-mellonta.9";
 const releaseBase = "https://github.com/Mellonta/raft-source/releases/download";
 
 function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), "mellonta-client-test-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "mellonta-client-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "user");
   const state = join(home, "state with spaces ' $literal");
@@ -24,7 +24,7 @@ function fixture(t) {
     chmodSync(path, 0o755);
   }
   const nodeScript = (body) => `#!${process.execPath}\n${body}\n`;
-  executable(join(tools, "uname"), '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo "${MOCK_MACHINE:-x86_64}";; esac\n');
+  executable(join(tools, "uname"), '#!/bin/sh\ncase "$1" in -s) echo "${MOCK_OS:-Linux}";; -m) echo "${MOCK_MACHINE:-x86_64}";; esac\n');
   // GNU realpath -m is present on Linux; emulate it for the macOS unit run.
   executable(join(tools, "realpath"), nodeScript(`console.log(require('node:path').resolve(process.argv.at(-1)));`));
   executable(join(tools, "sha256sum"), nodeScript(`
@@ -117,17 +117,33 @@ test("setup accepts the runtime's privacy spellings and saves the chosen default
   }
 });
 
-test("32-bit ARM is rejected before downloading or modifying state", (t) => {
+test("macOS resolves symlinked parent paths before reset", { skip: process.platform !== "darwin" }, (t) => {
   const f = fixture(t);
-  f.existing();
-  const result = f.run(["--reset"], { MOCK_MACHINE: "armv7l" });
+  const mac = { MOCK_OS: "Darwin", MOCK_MACHINE: "arm64" };
+  const link = join(f.root, "parent-link");
+  symlinkSync(f.root, link);
+  const result = f.run(["--reset", "--home", join(link, "user")], mac);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /x86-64 and ARM64/);
+  assert.match(result.stderr, /Refusing to reset a general-purpose directory/);
   assert.equal(existsSync(f.env.MOCK_DOWNLOADS), false);
-  assert.equal(readFileSync(join(f.state, "computer/old-session"), "utf8"), "old credentials");
+  f.existing();
+  success(f.run(["--reset"], mac));
+  assert.equal(existsSync(join(f.state, "computer/old-session")), false);
 });
 
-test("help does not require Linux or a configured server", () => {
+for (const [os, machine] of [["Linux", "armv7l"], ["Darwin", "x86_64"]]) {
+  test(`setup rejects ${os} ${machine} before downloading or modifying state`, (t) => {
+    const f = fixture(t);
+    f.existing();
+    const result = f.run(["--reset"], { MOCK_OS: os, MOCK_MACHINE: machine });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /x86-64 and ARM64/);
+    assert.equal(existsSync(f.env.MOCK_DOWNLOADS), false);
+    assert.equal(readFileSync(join(f.state, "computer/old-session"), "utf8"), "old credentials");
+  });
+}
+
+test("help does not require a supported platform or a configured server", () => {
   const result = spawnSync("bash", [script, "--help"], { encoding: "utf8" });
   success(result);
   assert.match(result.stdout, /Node, npm, Docker, and a source checkout are not required/);

@@ -11,7 +11,7 @@ vi.mock("./proxy", () => ({ computerFetch: fetchMock }));
 afterEach(() => vi.resetAllMocks());
 const version = "1.0.43-mellonta.1";
 
-test.each(["x64", "arm64"])("%s upgrade verifies a fork installer and pins its authority despite inherited upstream settings", async (arch) => {
+test.each([["linux", "x64"], ["linux", "arm64"], ["darwin", "arm64"]] as const)("%s-%s upgrade verifies a fork installer and pins its authority despite inherited upstream settings", async (platform, arch) => {
   const home = await mkdtemp(join(tmpdir(), "mellonta-upgrade-"));
   const bytes = "#!/bin/sh\necho fixture\n";
   const hash = createHash("sha256").update(bytes).digest("hex");
@@ -26,7 +26,7 @@ test.each(["x64", "arm64"])("%s upgrade verifies a fork installer and pins its a
       RAFT_HOME: home, RAFT_COMPUTER_RELEASE_BASE: "https://upstream.invalid",
       RAFT_COMPUTER_RELEASE_BACKEND: "mellonta", RAFT_COMPUTER_INSTALLER_DL_BASE: "https://hands.invalid",
       RAFT_COMPUTER_INSTALL_DIR: join(home, "bin with spaces"),
-    }, "linux", arch);
+    }, platform, arch);
     expect(result.command).toBe("/usr/bin/env");
     expect(result.args).toContain(`RAFT_COMPUTER_RELEASE_BASE=${MELLONTA_RELEASE_BASE}`);
     expect(result.args).toContain(`RAFT_COMPUTER_INSTALL_CHANNEL=pinned:${version}`);
@@ -47,6 +47,7 @@ test("a corrupt installer is rejected before creating local state or executing a
 });
 
 test("upstream versions, unsupported channels and remote upgrades never download an upstream installer", async () => {
+  await expect(installerCommand(["upgrade", "--version", version], { RAFT_COMPUTER_RELEASE_BACKEND: "mellonta" }, "darwin", "x64")).rejects.toThrow("Apple Silicon");
   await expect(installerCommand(["upgrade", "--version", "1.0.43"], { RAFT_COMPUTER_RELEASE_BACKEND: "mellonta" }, "linux", "x64")).rejects.toThrow("Mellonta version");
   await expect(installerCommand(["upgrade", "--channel", "alpha"], { RAFT_COMPUTER_RELEASE_BACKEND: "mellonta" }, "linux", "x64")).rejects.toThrow("only the main");
   await expect(launchInstallerDetached("/unused", ["upgrade"], "request", { RAFT_COMPUTER_RELEASE_BACKEND: "mellonta" })).rejects.toThrow("upgrades are local");

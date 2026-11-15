@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the Computer only after verification on both Linux architectures.
+# Publish after all native Computer targets have passed verification.
 set -Eeuo pipefail
 tag=${1:?release tag}
 notes=${2:?release notes file}
@@ -19,7 +19,7 @@ if meta=$(gh release view "$tag" --json isDraft,targetCommitish); then
   [[ "$target" == "$GITHUB_SHA" ]] || { echo "Draft $tag targets a different commit." >&2; exit 1; }
 else
   gh release create "$tag" --draft --target "$GITHUB_SHA" --verify-tag \
-    --title "Raft Computer $tag (Linux x86-64 and ARM64)" --notes-file "$notes"
+    --title "Raft Computer $tag (Linux x86-64/ARM64 and Apple Silicon)" --notes-file "$notes"
 fi
 # A failed upload leaves a draft. A retry can finish it without replacing a public asset.
 gh release upload "$tag" "$@" --clobber

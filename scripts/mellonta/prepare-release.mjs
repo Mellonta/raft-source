@@ -10,8 +10,8 @@ if (!/^\d+\.\d+\.\d+-mellonta\.\d+$/.test(version)) throw new Error("Expected a 
 const manifest = JSON.parse(await readFile(join(out, "manifest.json"), "utf8"));
 if (manifest.version !== version) throw new Error("Release manifest version does not match the source");
 const targets = Object.keys(manifest.targets).sort();
-if (!targets.length || targets.some(target => !["linux-x64", "linux-arm64"].includes(target))) {
-  throw new Error("Expected Linux x64/ARM64 release targets");
+if (!targets.length || targets.some(target => !["linux-x64", "linux-arm64", "darwin-arm64"].includes(target))) {
+  throw new Error("Expected a Linux x64/ARM64 or macOS ARM64 release target");
 }
 const upstreamInstaller = await readFile(join(root, "scripts/mellonta/install-client.sh"), "utf8");
 const installer = `#!/bin/sh

@@ -1,4 +1,4 @@
-name: Mellonta Linux release
+name: Mellonta native Computer release
 
 on:
   push:
@@ -45,9 +45,14 @@ jobs:
       matrix:
         include:
           - arch: x64
+            platform: linux
             runner: ubuntu-22.04
           - arch: arm64
+            platform: linux
             runner: ubuntu-22.04-arm
+          - arch: arm64
+            platform: darwin
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -70,15 +75,15 @@ jobs:
           pnpm --filter @botiverse/raft-computer test:manifest
           pnpm --filter @botiverse/raft-shared exec vitest run src/privacyMode.test.ts
           node --test scripts/mellonta/merge-client-artifacts.test.mjs scripts/mellonta/setup-client.test.mjs
-      - name: Build and install the native Linux executable
+      - name: Build and install the native executable
         run: |
-          test "$(node -p process.arch)" = "${{ matrix.arch }}"
+          test "$(node -p 'process.platform + "-" + process.arch')" = "${{ matrix.platform }}-${{ matrix.arch }}"
           bash scripts/mellonta/build-client.sh "$RUNNER_TEMP/client-release"
       - name: Exercise the matching setup script with this candidate
         run: node scripts/mellonta/smoke-install.mjs "$RUNNER_TEMP/client-release" --setup
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: linux-${{ matrix.arch }}
+          name: ${{ matrix.platform }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/client-release/
           if-no-files-found: error
           retention-days: 1
@@ -96,9 +101,8 @@ jobs:
           node-version-file: .node-version
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: linux-*
           path: artifacts
-      - name: Verify both architectures and prepare the combined release
+      - name: Verify all three targets and prepare the combined release
         run: |
           node scripts/mellonta/merge-client-artifacts.mjs artifacts packages/computer/dist-native
           node scripts/mellonta/prepare-release.mjs

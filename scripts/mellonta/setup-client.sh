@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Mellonta Linux client and save launchers for one Raft home.
+# Install the Mellonta native client and save launchers for one Raft home.
 set -Eeuo pipefail
 
 # Filled in the copy attached to a release; checkouts use the adjacent version file.
@@ -9,7 +9,7 @@ usage() {
   cat <<'EOF'
 Usage: bash setup-client.sh --server-url URL --workspace SLUG [options]
 
-Installs the matching Mellonta Linux x86-64 or ARM64 release, then logs in,
+Installs the matching release for Linux x86-64/ARM64 or Apple Silicon macOS, then logs in,
 attaches to your workspace, and starts Computer. Run as your agent user, without
 sudo. Node, npm, Docker, and a source checkout are not required.
 
@@ -42,9 +42,18 @@ expand_home() {
   esac
 }
 
+canonical_path() {
+  if [[ "$host_os" == Darwin ]]; then
+    # Stock macOS zsh resolves links in the existing prefix, even for new paths.
+    /bin/zsh -fc 'print -r -- "${1:P}"' zsh "$1"
+  else
+    realpath -m -- "$1"
+  fi
+}
+
 check_reset_home() {
   case "$state_home" in
-    /|/data|/home|/root|/tmp|/var|/opt|/usr|/srv|/mnt|/media|"$(realpath -m -- "$HOME")"|"$(realpath -m -- "$HOME/.local/bin")")
+    /|/data|/home|/root|/tmp|/var|/opt|/usr|/srv|/mnt|/media|/Users|/Volumes|/private|/private/tmp|/private/var|"$(canonical_path "$HOME")"|"$(canonical_path "$HOME/.local/bin")")
       fail "Refusing to reset a general-purpose directory: $state_home" ;;
   esac
   case "$(pwd -P)/" in
@@ -130,10 +139,11 @@ main() {
   [[ "$server_url" =~ ^https?://[^/?#@[:space:]]+/?$ ]] || fail "--server-url must be an http(s) origin, e.g. http://a.b.com:8080."
   server_url=${server_url%/}
   [[ "$workspace" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || fail "--workspace must be the workspace slug from your portal URL, not a URL or UUID."
-  [[ "$(uname -s)" == Linux ]] || fail "The published Mellonta client supports Linux only."
-  case "$(uname -m)" in
-    x86_64|amd64|aarch64|arm64) ;;
-    *) fail "The published Mellonta client supports x86-64 and ARM64 only." ;;
+  local host_os
+  host_os=$(uname -s)
+  case "$host_os-$(uname -m)" in
+    Linux-x86_64|Linux-amd64|Linux-aarch64|Linux-arm64|Darwin-arm64) ;;
+    *) fail "Mellonta releases support Linux x86-64 and ARM64, and Apple Silicon macOS." ;;
   esac
   if (( ! install_only )) && [[ ! -t 0 || ! -t 1 ]]; then
     fail "Login needs an interactive terminal. Use --install-only, then run the saved connect.sh in a terminal."
@@ -145,19 +155,25 @@ main() {
   else
     command -v curl >/dev/null || fail "Missing curl for GitHub downloads."
   fi
-  for tool in sha256sum realpath awk mktemp ps; do
-    command -v "$tool" >/dev/null || fail "Missing $tool. On Ubuntu, install curl ca-certificates coreutils gawk procps."
+  local -a checksum=(sha256sum)
+  if [[ "$host_os" == Darwin ]]; then
+    checksum=(shasum -a 256)
+  else
+    command -v realpath >/dev/null || fail "Missing realpath."
+  fi
+  for tool in "${checksum[0]}" awk mktemp ps; do
+    command -v "$tool" >/dev/null || fail "Missing $tool."
   done
   umask 077
   state_home=$(expand_home "$state_home")
   [[ ! -L "${state_home%/}" ]] || fail "Pass the real state directory, not a symlink: $state_home"
-  state_home=$(realpath -m -- "$state_home")
+  state_home=$(canonical_path "$state_home")
   [[ ! -e "$state_home" || ( -d "$state_home" && -O "$state_home" ) ]] || fail "State must be a directory owned by the current user: $state_home"
   if [[ -z "$install_dir" ]]; then
     if [[ -x "$state_home/bin/raft-computer" ]]; then install_dir="$state_home/bin";
     else install_dir="$HOME/.local/bin"; fi
   fi
-  install_dir=$(realpath -m -- "$(expand_home "$install_dir")")
+  install_dir=$(canonical_path "$(expand_home "$install_dir")")
   if (( reset )); then check_reset_home; fi
 
   local latest_url expected actual asset
@@ -189,7 +205,7 @@ main() {
   done
   expected=$(awk '$2 == "install.sh" { print $1 }' "$client_setup_tmp/SHA256SUMS")
   [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || fail "Release has no unique installer checksum."
-  actual=$(sha256sum "$client_setup_tmp/install.sh")
+  actual=$("${checksum[@]}" "$client_setup_tmp/install.sh")
   [[ "${actual%% *}" == "$expected" ]] || fail "Installer checksum mismatch; nothing has been stopped or erased."
 
   export RAFT_HOME="$state_home" SLOCK_HOME="$state_home"

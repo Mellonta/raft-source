@@ -16,7 +16,7 @@ const nodeVersion = (await readFile(join(root, ".node-version"), "utf8")).trim()
 async function fixture(t, differingWasm = false) {
   const directory = await mkdtemp(join(tmpdir(), "mellonta-release-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  for (const target of ["linux-x64", "linux-arm64"]) {
+  for (const target of ["linux-x64", "linux-arm64", "darwin-arm64"]) {
     const dir = join(directory, target);
     await mkdir(dir);
     async function artifact(file, bytes) {
@@ -33,11 +33,11 @@ async function fixture(t, differingWasm = false) {
   return { directory, out: join(directory, "release") };
 }
 
-test("combined release contains both verified architectures and checksums for both installers' targets", async t => {
+test("combined release contains verified binaries and checksums for Linux and Apple Silicon", async t => {
   const { directory, out } = await fixture(t);
   await mergeClientArtifacts(directory, out);
   const manifest = JSON.parse(await readFile(join(out, "manifest.json"), "utf8"));
-  assert.deepEqual(Object.keys(manifest.targets).sort(), ["linux-arm64", "linux-x64"]);
+  assert.deepEqual(Object.keys(manifest.targets).sort(), ["darwin-arm64", "linux-arm64", "linux-x64"]);
   const run = spawnSync(process.execPath, [join(root, "scripts/mellonta/prepare-release.mjs"), out], { encoding: "utf8" });
   assert.equal(run.status, 0, run.stderr);
   const sums = await readFile(join(out, "SHA256SUMS"), "utf8");
@@ -45,7 +45,7 @@ test("combined release contains both verified architectures and checksums for bo
     const [hash, file] = line.split(/\s+/);
     assert.equal(createHash("sha256").update(await readFile(join(out, file))).digest("hex"), hash);
   }
-  for (const target of ["linux-arm64", "linux-x64"]) assert.ok(sums.includes(`raft-computer-${target}.gz`));
+  for (const target of Object.keys(manifest.targets)) assert.ok(sums.includes(`raft-computer-${target}.gz`));
 });
 
 test("a corrupt ARM build cannot produce a partial release", async t => {
@@ -63,7 +63,7 @@ test("architectures must agree on the shared WASM artifact", async t => {
 
 test("a missing architecture cannot produce a partial release", async t => {
   const { directory, out } = await fixture(t);
-  await rm(join(directory, "linux-arm64"), { recursive: true });
+  await rm(join(directory, "darwin-arm64"), { recursive: true });
   await assert.rejects(mergeClientArtifacts(directory, out));
   await assert.rejects(access(out));
 });

@@ -115,7 +115,7 @@ export default function ComputerCommandGuide({
   const [copiedCommand, setCopiedCommand] = useState<CopyTarget | null>(null);
   const [showConnectOnly, setShowConnectOnly] = useState(false);
 
-  const linuxDistribution = Boolean(mellontaComputerVersion());
+  const mellontaRelease = Boolean(mellontaComputerVersion());
   const isComputerGuide = Boolean(
     computerCommand || computerInstallCommand || windowsComputerCommand || windowsComputerInstallCommand,
   );
@@ -181,7 +181,7 @@ export default function ComputerCommandGuide({
           <Terminal size={16} className="text-foreground-muted" aria-hidden="true" />
           <SectionEyebrow as="div">{formatMessage({ id: "machine.commandGuide.connectCommand" })}</SectionEyebrow>
         </div>
-        {linuxDistribution ? <span className="text-footnote">Linux x86-64 / ARM64</span> : (
+        {mellontaRelease ? <span className="text-footnote">macOS (Apple Silicon) · Linux (x86-64 / ARM64)</span> : (
           <SegmentedControl<ComputerCommandPlatform>
             value={platform}
             onValueChange={handlePlatformChange}
@@ -201,7 +201,7 @@ export default function ComputerCommandGuide({
         )}
       </div>
 
-      {!linuxDistribution && (
+      {!mellontaRelease && (
         <p className="mb-3 text-footnote text-foreground-muted">
           {isComputerGuide && platform === "windows"
             ? formatMessage({ id: "machine.commandGuide.windowsComputerDescription" })

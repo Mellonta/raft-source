@@ -22,10 +22,12 @@ const server = createServer(async (req, res) => {
   } catch { res.writeHead(404).end(); }
 });
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
+const releaseBase = `http://127.0.0.1:${server.address().port}`;
 const env = {
   ...process.env, HOME: home, RAFT_HOME: join(home, "state"), SLOCK_HOME: join(home, "state"),
   RAFT_COMPUTER_INSTALL_DIR: join(home, "bin"), RAFT_COMPUTER_NO_MODIFY_PATH: "1",
-  RAFT_COMPUTER_RELEASE_BASE: `http://127.0.0.1:${server.address().port}`,
+  RAFT_COMPUTER_RELEASE_BASE: releaseBase, RAFT_COMPUTER_UPGRADE_BASE_URL: releaseBase,
+  RAFT_COMPUTER_RELEASE_BACKEND: "mellonta", RAFT_PRIVACY_MODE: "1",
 };
 async function run(command, args) {
   let stdout = "";
@@ -42,10 +44,10 @@ try {
   assert.equal(await run(join(home, "bin/raft-computer"), ["--version"]), version);
   assert.equal((await readFile(join(home, "state/computer/channel"), "utf8")).trim(), `pinned:${version}`);
   assert.ok((await stat(join(home, "bin/photon_rs_bg.wasm"))).size > 0);
-  // An attended reinstall must update an old pin even without legacy K state.
+  // Exercise the installed executable's fork updater against the same local release.
   await writeFile(join(home, "state/computer/channel"), "pinned:1.0.28-mellonta.1\n");
   await writeFile(join(home, "state/retained"), "keep credentials and workspaces");
-  await run("sh", [join(out, "install.sh"), "--version", version]);
+  await run(join(home, "bin/raft-computer"), ["upgrade", "--target-version", version]);
   assert.equal((await readFile(join(home, "state/computer/channel"), "utf8")).trim(), `pinned:${version}`);
   assert.equal(await readFile(join(home, "state/retained"), "utf8"), "keep credentials and workspaces");
   assert.equal(await run(join(home, "bin/raft-computer"), ["--version"]), version);

@@ -3,7 +3,8 @@
 Use a checkout of this branch for all commands. The server is based on Raft
 1.24.0. The Computer release pin in `scripts/mellonta/client-version` is
 independent of the server version. The production server runs with Docker on
-Linux and macOS. The Mellonta Computer installer supports Linux x86-64 and ARM64.
+Linux and macOS. Raft Computer runs natively on Apple Silicon Macs and on
+x86-64 and ARM64 Linux machines.
 Run these scripts with Bash. Installation or publication of the corresponding
 release is a separate operation from editing the source.
 
@@ -63,16 +64,17 @@ over trusted HTTPS needs no Chrome flag.
 
 ## Connect a Computer
 
-Install your agent runtime separately. Use the Linux account that owns its
-credentials. From the matching checkout, or using the version-pinned
+Install your agent runtime separately. Use the macOS or Linux account that owns
+its credentials. From the matching checkout, or using the version-pinned
 `setup-client.sh` attached to a client release, run:
 
 ```bash
 bash scripts/mellonta/setup-client.sh --server-url http://raft.company.example:8001 --workspace /my-team
 ```
 
-The installer selects x86-64 or ARM64, checks the fork's binary and Photon WASM,
-then runs the device login and attaches the machine. No system-wide Node or npm
+The installer selects the release for the host OS and CPU, checks the fork's
+binary and Photon WASM, then runs device login and attaches the machine.
+On macOS it also verifies the executable's code signature. No system-wide Node or npm
 is required. Use `--install-only` to defer login. Defaults are `~/.slock` for
 state and `~/.local/bin` for a fresh binary. The shell launchers under
 `~/.slock/mellonta/` use the selected state, release source and privacy setting.
@@ -124,15 +126,24 @@ to the old schema requires restoring that backup.
 
 ## Computer build and release
 
-Build each Computer target on its own Linux architecture with Ubuntu 22.04 or
-newer. Install the Node version in `.node-version` and the pnpm version in the
-root `package.json`.
+Build on the target architecture using an Apple Silicon Mac with the Xcode
+Command Line Tools, or Ubuntu 22.04 or newer on x86-64 or ARM64. Use the
+native Node version in `.node-version` and the pnpm version in the root
+`package.json`.
 
 ```bash
 bash scripts/mellonta/build-client.sh /tmp/raft-computer-release
 ```
 
-The release workflow builds both architectures, tests each installer and merges
-the verified artifacts into one client release. The portal uses the same
-version pin for its Linux setup command. Pushing a tag matching
-`scripts/mellonta/client-version` publishes the release after both builds pass.
+To install the local build before publishing, run:
+
+```bash
+bash scripts/mellonta/setup-client.sh --assets /tmp/raft-computer-release --server-url http://raft.company.example:8001 --workspace /my-team
+```
+
+The macOS build uses an ad-hoc code signature. The fork release workflow does
+not apply an Apple Developer ID signature or submit the executable for notarization.
+The workflow tests all three native targets and combines their artifacts into
+one release. The portal uses the same version pin for its setup command.
+Pushing a tag matching `scripts/mellonta/client-version` publishes the release
+after all three builds pass.
