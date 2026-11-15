@@ -522,6 +522,32 @@ test("setup (legacy-daemon branch, no terminal): a saved session the server no l
   });
 });
 
+test("noninteractive legacy setup never sends a different server's access or refresh token to the target", async () => {
+  await withHome(async (home) => {
+    let requests = 0;
+    const server = createServer((_req, res) => { requests++; res.writeHead(401).end(); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      for (const writeSavedSession of [writeSession, writeExpiredSession]) {
+        await writeSavedSession(home, DEFAULT_SLOCK_SERVER_URL);
+        const before = await readFile(userSessionPath(home), "utf8");
+        await assert.rejects(
+          setupCore(home, { serverSlug: "alpha", serverUrl: `http://127.0.0.1:${address.port}`, yes: true }, {
+            isTty: false, detectLegacyMigration: detectWithLegacyEvidence([]),
+          }, () => {}),
+          (err: unknown) => err instanceof ComputerError && err.code === "NON_INTERACTIVE_SETUP_REQUIRES_FLAGS",
+        );
+        assert.equal(await readFile(userSessionPath(home), "utf8"), before);
+        assert.equal(requests, 0);
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
 const MIGRATE_TOKEN = "dvmt_setupMigrateToken0123";
 
 const unexpectedMigrateApproval: NonNullable<SetupDeps["requestMigrateApproval"]> = async (input) => {

@@ -71,7 +71,7 @@ jobs:
         run: |
           pnpm --filter @botiverse/raft-computer --filter @botiverse/raft-daemon --filter @botiverse/raft-shared typecheck
           pnpm --filter @botiverse/raft-daemon exec vitest run src/privacyMode.test.ts src/managedMcpRuntimeProxy.test.ts src/traceBundleUpload.test.ts src/directUploadCapability.test.ts src/agentProcessManager.sessionTranscript.test.ts --maxWorkers=2
-          pnpm --filter @botiverse/raft-computer exec vitest run src/proxy.test.ts src/services/diagnosticsPush.test.ts src/mellontaInstaller.test.ts src/externalInstaller.test.ts src/nativePublish.contract.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-computer exec vitest run src/proxy.test.ts src/services/attachGrant.test.ts src/services/diagnosticsPush.test.ts src/mellontaInstaller.test.ts src/externalInstaller.test.ts src/nativePublish.contract.test.ts --maxWorkers=2
           pnpm --filter @botiverse/raft-computer test:manifest
           pnpm --filter @botiverse/raft-shared exec vitest run src/privacyMode.test.ts
           node --test scripts/mellonta/merge-client-artifacts.test.mjs scripts/mellonta/setup-client.test.mjs

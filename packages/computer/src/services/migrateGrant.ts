@@ -25,8 +25,7 @@ import { hostname as osHostname } from "node:os";
 import { DeviceGrantRejectedError, type ComputerMigrateGrantRequest } from "../apiClient";
 import { deriveDefaultComputerName } from "../paths";
 import { formatServerSlugDisplay, normalizeServerSlug } from "../serverState";
-import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
-import { readUserSessionAuth } from "../lib/userSession";
+import { resolveDeviceApprovalServerUrl } from "../lib/userSession";
 import { ComputerServiceError } from "./errors";
 import { approvalOsLabel } from "./attachGrant";
 import { lostConnectionMessage, persistUserSession, runDeviceAuthorization, type LoginOptions } from "./login";
@@ -62,9 +61,7 @@ export async function requestMigrateApproval(
 ): Promise<MigrateApprovalResult> {
   options.signal?.throwIfAborted?.();
   const requestedSlug = normalizeServerSlug(input.serverSlug);
-  // The saved session (if any, from an older `login`) is read for its server
-  // URL only.
-  const baseUrl = resolveServerUrl(input.serverUrl, (await readUserSessionAuth(input.slockHome)).serverUrl, resolveServerUrlEnv());
+  const baseUrl = await resolveDeviceApprovalServerUrl(input.slockHome, input.serverUrl);
   const grant: ComputerMigrateGrantRequest = {
     kind: "computer_migrate",
     machineName: input.name?.trim() || deriveDefaultComputerName(),

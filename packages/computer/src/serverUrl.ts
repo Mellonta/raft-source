@@ -12,10 +12,15 @@ export function computerPortalOrigin(serverUrl?: string): string {
   return new URL(serverUrl).origin;
 }
 
-export function canonicalizeServerUrl(serverUrl: string): string {
+export function normalizeServerUrl(serverUrl: string): string {
   const trimmed = serverUrl.trim().replace(/\/+$/, "");
-  assertPrivacyServiceUrl(trimmed);
   return trimmed === LEGACY_PRODUCTION_SERVER_URL ? DEFAULT_SLOCK_SERVER_URL : trimmed;
+}
+
+export function canonicalizeServerUrl(serverUrl: string): string {
+  const url = normalizeServerUrl(serverUrl);
+  assertPrivacyServiceUrl(url);
+  return url;
 }
 
 export function resolveServerUrl(...candidates: Array<string | undefined | null>): string {

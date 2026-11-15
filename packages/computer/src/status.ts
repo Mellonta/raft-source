@@ -22,7 +22,7 @@ import {
   serverConnectedMarkerPath,
 } from "./paths";
 import { formatServerSlugDisplay, listServerAttachments } from "./serverState";
-import { canonicalizeServerUrl } from "./serverUrl";
+import { normalizeServerUrl } from "./serverUrl";
 import { readPidfileAt, isProcessAlive, readProcessStartTimeMs } from "./internal/process-primitives";
 import { findLiveServicePidReadOnly, type ServicePidIdentityDeps } from "./internal/service-pid-fallback";
 import { isDegraded, readTerminalUnlinked } from "./health";
@@ -66,7 +66,7 @@ function str(v: unknown): string | null {
 }
 
 function canonicalServerUrlOrNull(v: unknown): string | null {
-  return typeof v === "string" && v.length > 0 ? canonicalizeServerUrl(v) : null;
+  return typeof v === "string" && v.length > 0 ? normalizeServerUrl(v) : null;
 }
 
 export type DaemonState = { running: true; pid: number } | { running: false };

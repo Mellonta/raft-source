@@ -1357,6 +1357,7 @@ export async function setupCore(
   const sessionAuthForTarget = async (
     session: { accessToken: string; serverUrl?: string },
   ): Promise<LegacyAuth | "auth_required"> => {
+    if (!session.accessToken) return "auth_required";
     const baseUrl = resolveServerUrl(opts.serverUrl, session.serverUrl, resolveServerUrlEnv());
     const serversResult = await buildServers(baseUrl, session.accessToken).list();
     if (serversResult.status === "auth_required") return "auth_required";
@@ -1431,7 +1432,7 @@ export async function setupCore(
     } else {
       emit("This server does not support one-time approvals yet, so this machine signed in with a user session instead.");
     }
-    const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome));
+    const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome, opts.serverUrl));
     if (signedIn === "auth_required") {
       throw new ComputerError(
         "USER_SESSION_EXPIRED",
@@ -1450,7 +1451,7 @@ export async function setupCore(
     // removes it (#wg-device-auth:#1, Tenny 207eca94).
     if (isTty) return (legacy.auth = await approveLegacyMigration());
     let saved = false;
-    if (await hasUnexpiredUserSessionShape(slockHome)) {
+    if (await hasUnexpiredUserSessionShape(slockHome, opts.serverUrl)) {
       emit("Logging in… done (already logged in).");
       saved = true;
     } else if (await refreshSession(slockHome, opts.serverUrl)) {
@@ -1458,7 +1459,7 @@ export async function setupCore(
       saved = true;
     }
     if (saved) {
-      const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome));
+      const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome, opts.serverUrl));
       if (signedIn !== "auth_required") return (legacy.auth = signedIn);
       throw new ComputerError(
         "USER_SESSION_EXPIRED",

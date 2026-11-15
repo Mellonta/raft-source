@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 
 import { CURRENT_SCHEMA_VERSION, userSessionPath } from "../paths";
 import { computerFetch } from "../proxy";
-import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
+import { canonicalizeServerUrl, normalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
 
 const USER_SESSION_EXPIRY_LEEWAY_MS = 30_000;
 const refreshUserSessionInflight = new Map<string, Promise<boolean>>();
@@ -41,10 +41,25 @@ export type UsableUserSession =
       serverUrl?: string;
     };
 
+export async function resolveDeviceApprovalServerUrl(slockHome: string, serverUrl?: string): Promise<string> {
+  if (serverUrl?.trim()) return resolveServerUrl(serverUrl);
+  const session = await readUserSession(slockHome);
+  return resolveServerUrl(typeof session?.serverUrl === "string" ? session.serverUrl : undefined, resolveServerUrlEnv());
+}
+
+function sessionBelongsToAnotherServer(session: UserSession | null, serverUrl?: string): boolean {
+  if (!serverUrl?.trim() || typeof session?.serverUrl !== "string" || !session.serverUrl.trim()) return false;
+  const saved = URL.parse(normalizeServerUrl(session.serverUrl));
+  const target = URL.parse(normalizeServerUrl(serverUrl));
+  return !saved || !target || saved.href !== target.href;
+}
+
 export async function readUserSessionAuth(
   slockHome: string,
+  serverUrl?: string,
 ): Promise<{ accessToken: string; serverUrl?: string }> {
   const session = await readUserSession(slockHome);
+  if (sessionBelongsToAnotherServer(session, serverUrl)) return { accessToken: "" };
   return {
     accessToken: typeof session?.accessToken === "string" ? session.accessToken : "",
     ...(typeof session?.serverUrl === "string" ? { serverUrl: canonicalizeServerUrl(session.serverUrl) } : {}),
@@ -64,9 +79,9 @@ export async function readUserSessionIdentity(slockHome: string): Promise<UserSe
   };
 }
 
-export async function hasUnexpiredUserSessionShape(slockHome: string): Promise<boolean> {
+export async function hasUnexpiredUserSessionShape(slockHome: string, serverUrl?: string): Promise<boolean> {
   const session = await readUserSession(slockHome);
-  return isUsableSessionShape(session) && !isJwtExpired(session.accessToken);
+  return isUsableSessionShape(session) && !sessionBelongsToAnotherServer(session, serverUrl) && !isJwtExpired(session.accessToken);
 }
 
 export async function ensureUsableUserSession(
@@ -139,6 +154,7 @@ export async function refreshUserSession(slockHome: string, serverUrl?: string):
     return false;
   }
 
+  if (sessionBelongsToAnotherServer(session, serverUrl)) return false;
   const baseUrl = resolveServerUrl(serverUrl, session.serverUrl, resolveServerUrlEnv());
   const existing = refreshUserSessionInflight.get(file);
   if (existing) return existing;

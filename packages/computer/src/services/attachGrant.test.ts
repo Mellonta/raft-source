@@ -10,6 +10,8 @@ import { join } from "node:path";
 
 import { ComputerServiceError } from "./errors";
 import { approveMachine, approvalOsLabel, attachWithApproval, attachWithToken } from "./attachGrant";
+import { requestMigrateApproval } from "./migrateGrant";
+import { buildStatusReport } from "../status";
 import type { ComputerApiEvent } from "../lib/events";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
@@ -203,6 +205,40 @@ test("attach by approval: asks for a computer_attach grant, sends the dvat_ toke
       assert.doesNotMatch(visible, /sk_computer_fromgrant/, "the raw key never reaches an event or the result");
     });
   });
+});
+
+test("private setup uses the explicit server for attach and migration despite a saved hosted login", async () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+  try {
+    await withHome(async (home) => {
+      const hostedUrl = "https://api.raft.build";
+      const previous = JSON.stringify({ kind: "user-session", serverUrl: hostedUrl, accessToken: "old-hosted-access" });
+      await mkdir(join(home, "computer"));
+      await writeFile(sessionPath(home), previous);
+      const migrateReply = {
+        status: 200,
+        body: { kind: "computer_migrate", migrateToken: "dvmt_localGrant", serverId: SERVER_ID, serverSlug: "alpha" },
+      };
+      await withFakeServer({ token: [ATTACH_TOKEN_REPLY, migrateReply] }, async (server) => {
+        const input = { slockHome: home, serverSlug: "alpha", serverUrl: server.baseUrl };
+        await attachWithApproval(input);
+        const move = await requestMigrateApproval({ ...input, retryCommand: "raft-computer setup /alpha" });
+        assert.equal(move.outcome, "approved");
+        assert.deepEqual(server.authorizeBodies.map(({ grant }) => (grant as { kind: string }).kind), ["computer_attach", "computer_migrate"]);
+        assert.deepEqual(server.attachAuth, [`Bearer ${ATTACH_TOKEN}`]);
+        assert.deepEqual(server.preflightAuth, [`Bearer ${SK_COMPUTER}`]);
+        const status = await buildStatusReport(home);
+        assert.equal(status.loginServerUrl, hostedUrl);
+        assert.deepEqual(status.servers.map(row => row.serverUrl), [server.baseUrl]);
+        assert.equal(await readFile(sessionPath(home), "utf8"), previous);
+      });
+      for (const serverUrl of [hostedUrl, undefined]) {
+        await assert.rejects(() => approveMachine({ slockHome: home, serverUrl }), /RAFT_PRIVACY_MODE disables vendor services/);
+      }
+    });
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 
 test("attach by approval: an older server answering with a session falls back to the session attach", async () => {
