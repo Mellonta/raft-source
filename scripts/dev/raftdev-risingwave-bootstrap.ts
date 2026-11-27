@@ -298,7 +298,7 @@ export interface RisingWaveBootstrapArtifact {
  * conversation unread reads it instead of 075's rw_inbox_muted_full_v2 (same
  * columns and semantics), which is therefore not built.
  */
-export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifact[] = [
+export const RISINGWAVE_SERVING_ARTIFACTS: readonly RisingWaveBootstrapArtifact[] = [
   {
     // No MV from 024 is read any more: rw_followed_thread_stats_v1 is superseded
     // by v3 (070) and the rest is the retired sidebar/unread generation. Applied
@@ -392,6 +392,10 @@ export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifac
     file: "infra/risingwave/sql/074-followed-threads-v5.sql",
     relations: ["rw_followed_threads_v5"],
   },
+];
+
+export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifact[] = [
+  ...RISINGWAVE_SERVING_ARTIFACTS,
   // Parallel 081 build only. The serving switch is a separate PR/release.
   { file: "infra/risingwave/sql/081-computed-joint-members/01-rw_joint_channel_members_v1.sql", relations: ["rw_joint_channel_members_v1"] },
   { file: "infra/risingwave/sql/081-computed-joint-members/02-rw_joint_channel_admissions_v1.sql", relations: ["rw_joint_channel_admissions_v1"] },
@@ -624,6 +628,7 @@ function isDdlSetting(body: string): boolean {
  */
 export function buildRisingWaveBootstrapStatements(
   artifacts: Readonly<Record<string, string>>,
+  manifest: readonly RisingWaveBootstrapArtifact[] = RISINGWAVE_BOOTSTRAP_ARTIFACTS,
 ): string[] {
   const created = new Set<string>();
   const referenced = new Set<string>();
@@ -651,7 +656,7 @@ export function buildRisingWaveBootstrapStatements(
 
   for (const table of RISINGWAVE_CDC_TABLES) add(createCdcTableStatement(table), "CDC projection");
 
-  for (const artifact of RISINGWAVE_BOOTSTRAP_ARTIFACTS) {
+  for (const artifact of manifest) {
     const raw = artifacts[artifact.file];
     if (raw === undefined) throw new Error(`missing RisingWave artifact ${artifact.file}`);
     const label = artifact.file.split("/").pop() ?? artifact.file;

@@ -25,6 +25,17 @@ export const COMPUTER_INSTALL_DOCS_URL = "https://docs.raft.build/features/serve
 
 export type ComputerCommandPlatform = "mac-linux" | "windows";
 
+/** Set by Mellonta's web build and dev launcher using the checked-in client pin. */
+export function mellontaComputerVersion(): string | undefined {
+  const version = import.meta.env?.VITE_MELLONTA_COMPUTER_VERSION;
+  if (version && !/^\d+\.\d+\.\d+-mellonta\.\d+$/.test(version)) throw new Error("Invalid Mellonta Computer version");
+  return version || undefined;
+}
+
+function shellArg(value: string): string {
+  return "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
 function normalizeComputerVersionPin(version?: string | null): string | null {
   const normalized = version?.trim() ?? "";
   return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(normalized)
@@ -140,6 +151,27 @@ export function getComputerCommands(
   const platform = options.platform ?? "mac-linux";
 
   const privateMode = browserPrivacyMode();
+  const forkVersion = mellontaComputerVersion();
+  if (forkVersion && platform === "mac-linux") {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(slug)) return null;
+    const isolated = ISOLATED_DEPLOYMENT_ENVS.has(deploymentEnv ?? "");
+    const home = isolated ? '"$HOME"/' + shellArg(".raft-computer-" + slug) : '"${RAFT_HOME:-${SLOCK_HOME:-$HOME/.slock}}"';
+    const paths = isolated ? ` --home ${home} --install-dir ${home}/bin` : "";
+    const release = `https://github.com/Mellonta/raft-source/releases/download/${forkVersion}/setup-client.sh`;
+    const origin = shellArg(serverUrl || getServerUrl());
+    const workspace = shellArg("/" + slug);
+    // Run the downloaded Bash file with its original terminal available for device login.
+    const install = `(script=$(mktemp) && trap 'rm -f "$script"' EXIT && curl -fsSLo "$script" ${release} && RAFT_PRIVACY_MODE=${privateMode ? 1 : 0} bash "$script" --server-url ${origin} --workspace ${workspace}${paths} --install-only)`;
+    const binary = `bash ${home}/mellonta/raft-computer`;
+    const machine = options.machineId ? " --machine " + shellArg(options.machineId) : "";
+    const setup = `${binary} setup ${workspace} --server-url ${origin}${machine}`;
+    return {
+      install, setup, installAndSetup: `${install} && ${setup}`,
+      status: `${binary} status`, doctor: `${binary} doctor`, upgrade: `${binary} upgrade --target-version ${forkVersion}`,
+      restartService: `${binary} restart`,
+      restart: `${binary} restart ${workspace}`, stop: `${binary} stop`, start: `${binary} start`,
+    };
+  }
   const privacyEnv = privateMode
     ? (platform === "windows" ? '$env:RAFT_PRIVACY_MODE = "1"; ' : "RAFT_PRIVACY_MODE=1 ")
     : "";
@@ -166,7 +198,7 @@ export function getComputerCommands(
       const environment = `${privacyEnv}$env:RAFT_HOME = "${home}"; $env:RAFT_COMPUTER_INSTALL_DIR = "$env:RAFT_HOME\\bin";`;
       const binary = `& "$env:RAFT_COMPUTER_INSTALL_DIR\\raft-computer.exe"`;
       return {
-        install: privateMode ? "" : `${environment} ${windowsComputerInstallCommand(deploymentEnv, options.version)}`,
+        install: privateMode || forkVersion ? "" : `${environment} ${windowsComputerInstallCommand(deploymentEnv, options.version)}`,
         setup: `${environment} ${binary} setup /${slug}${setupArgs}`,
         installAndSetup: null,
         status: `${environment} ${binary} status`,
@@ -183,7 +215,7 @@ export function getComputerCommands(
     const environment = `${privacyEnv}RAFT_HOME="${home}" RAFT_COMPUTER_INSTALL_DIR="${home}/bin"`;
     const binary = `"${home}/bin/raft-computer"`;
     return {
-      install: privateMode ? "" : `${environment} sh -c '${computerInstallCommand(deploymentEnv, options.version)}'`,
+      install: privateMode || forkVersion ? "" : `${environment} sh -c '${computerInstallCommand(deploymentEnv, options.version)}'`,
       setup: `${environment} ${binary} setup /${slug}${setupArgs}`,
       installAndSetup: null,
       status: `${environment} ${binary} status`,
@@ -197,11 +229,11 @@ export function getComputerCommands(
   }
 
   return {
-    install: privateMode ? "" : platform === "windows"
+    install: privateMode || forkVersion ? "" : platform === "windows"
       ? windowsComputerInstallCommand(deploymentEnv, options.version)
       : computerInstallCommand(deploymentEnv, options.version),
     setup: `${privacyEnv}raft-computer setup /${slug}${setupArgs}`,
-    installAndSetup: privateMode || platform === "windows"
+    installAndSetup: privateMode || forkVersion || platform === "windows"
       ? null
       : computerInstallShellCommand(deploymentEnv, options.version, [
         `--setup /${slug}${setupArgs}${options.pairingId ? ` --pair=${options.pairingId}` : ""}`,

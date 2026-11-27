@@ -12,6 +12,7 @@ import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 import { parseChannel, readChannel } from "./lib/channelState";
 import { ComputerError } from "./lib/errors";
 import { HANDS_API_ORIGIN, HANDS_COMPUTER_APP_SLUG } from "./releaseAuthority";
+import { usesMellontaReleases } from "./computerRelease";
 import { COMPUTER_VERSION } from "./version";
 
 export {
@@ -178,6 +179,9 @@ export async function listChannelVersions(
   const platform = deps.platform ?? process.platform;
   const arch = deps.arch ?? process.arch;
   const apiChannel = mapListedChannel(channel);
+  if (usesMellontaReleases() && !deps.apiOrigin) {
+    throw new ComputerError("CHANNEL_VERSIONS_UNAVAILABLE", "Mellonta Computer versions are listed at https://github.com/Mellonta/raft-source/releases.");
+  }
   const origin = (deps.apiOrigin ?? HANDS_API_ORIGIN).replace(/\/+$/u, "");
   assertPrivacyServiceUrl(origin);
   const appSlug = deps.appSlug ?? HANDS_COMPUTER_APP_SLUG;

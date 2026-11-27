@@ -1,3 +1,5 @@
+import { mellontaInstallerCommand } from "./mellontaInstaller";
+import { usesMellontaReleases } from "./computerRelease";
 // The external installer is the only thing that installs, upgrades or
 // repairs Computer. Computer resolves one immutable installer, verifies its
 // bytes and executes it directly. Shell/PowerShell bootstraps are only for
@@ -136,6 +138,7 @@ export function installerChannel(env: NodeJS.ProcessEnv = process.env): string {
 export async function installerCommand(args: string[], env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform, arch: string = process.arch,
   stats: InstallerDownloadStats = {}): Promise<{ command: string; args: string[] }> {
+  if (usesMellontaReleases(env)) return mellontaInstallerCommand(args, env, platform, arch);
   // The upstream installer is a separate executable with its own Hands client.
   // Even a local download mirror cannot constrain its subsequent requests.
   if (privacyModeEnabled() || privacyModeEnabled(env)) {
@@ -310,6 +313,9 @@ const LAUNCH_RETRY_DELAY_MS = 500;
 export async function launchInstallerDetached(slockHome: string, args: string[], requestId: string,
   env: NodeJS.ProcessEnv = process.env, stats?: InstallerDownloadStats,
   beforeSpawn?: (command: string) => Promise<void>, deps: LaunchInstallerDeps = {}): Promise<number | null> {
+  if (usesMellontaReleases(env)) {
+    throw new Error("Mellonta upgrades are local. Run setup-client.sh or raft-computer upgrade --target-version X.Y.Z-mellonta.N on this Computer.");
+  }
   const childEnv = { ...env, RAFT_COMPUTER_INSTALLER_CALLER: undefined, RAFT_HOME: slockHome, SLOCK_HOME: slockHome, RAFT_COMPUTER_NON_INTERACTIVE: "1",
     RAFT_COMPUTER_OPERATION_ID: requestId, RAFT_COMPUTER_APPROVED_BY: `remote:${requestId}` };
   const invocation = await (deps.resolveCommand ?? installerCommand)(args, childEnv, undefined, undefined, stats);

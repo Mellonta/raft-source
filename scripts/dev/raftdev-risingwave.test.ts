@@ -49,6 +49,7 @@ import {
   RISINGWAVE_LOCAL_SOURCE,
   RISINGWAVE_PUBLICATION_TABLES,
   RISINGWAVE_REQUIRED_RELATIONS,
+  RISINGWAVE_SERVING_ARTIFACTS,
   RISINGWAVE_SERVER_READ_RELATIONS,
   splitSqlStatements,
 } from "./raftdev-risingwave-bootstrap";
@@ -609,6 +610,15 @@ test("SQL splitter ignores semicolons in strings, identifiers, comments, and dol
   assert.match(statements[0], /SELECT ';' AS value/);
   assert.match(statements[1], /SELECT \"semi;colon\" FROM t/);
   assert.match(statements[2], /SELECT \$\$body;value\$\$/);
+});
+
+test("single-node serving graph includes every server read without the 081 comparison graph", () => {
+  const files = Object.fromEntries(RISINGWAVE_SERVING_ARTIFACTS.map(({ file }) => [
+    file, readFileSync(new URL(`../../${file}`, import.meta.url), "utf8"),
+  ]));
+  const names = new Set(buildRisingWaveBootstrapStatements(files, RISINGWAVE_SERVING_ARTIFACTS).map(createdRelationName));
+  for (const relation of RISINGWAVE_SERVER_READ_RELATIONS) assert.ok(names.has(relation), relation);
+  assert.equal(names.has("rw_inbox_serving_jcm_v1"), false);
 });
 
 test("actual RFC bootstrap uses foreground settings and rewrites the production source", { skip: inSourceSnapshot }, () => {

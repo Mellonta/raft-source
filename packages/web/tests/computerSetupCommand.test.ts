@@ -386,3 +386,15 @@ test("the install channel Add Computer's pairing names is the channel its one-pa
   const prod = getComputerCommands("acme", "production", undefined, { pairingId: "x" })!.installAndSetup!;
   assert.ok(prod.includes("--pair=x") && !prod.includes("--channel"));
 });
+
+test("self-hosted portals give macOS and Linux the pinned fork installer and the deployment's server URL", () => {
+  vi.stubEnv("VITE_MELLONTA_COMPUTER_VERSION", "1.25.0-mellonta.1");
+  try {
+    const result = getComputerCommands("team", "production", "http://raft.example:8001", { machineId: "m-1" });
+    assert.ok(result && result.installAndSetup);
+    assert.match(result.install, /Mellonta\/raft-source\/releases\/download\/1\.25\.0-mellonta\.1\/setup-client.sh/);
+    assert.match(result.installAndSetup, /--server-url 'http:\/\/raft.example:8001'/);
+    assert.match(result.setup, /--machine 'm-1'/);
+    assert.equal(getComputerCommands("team", "production", "http://raft.example", { platform: "windows" })?.install, "");
+  } finally { vi.unstubAllEnvs(); }
+});
