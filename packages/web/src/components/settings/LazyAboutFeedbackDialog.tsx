@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 import { Suspense } from "react";
 import type { ComponentType, LazyExoticComponent } from "react";
 import { useIntl } from "react-intl";
@@ -37,6 +38,7 @@ export function LazyAboutFeedbackPanel({
 }: {
   panel?: ComponentType | LazyExoticComponent<ComponentType>;
 }) {
+  if (browserPrivacyMode()) return <p className="p-4">Vendor feedback is disabled in privacy mode.</p>;
   return (
     <Suspense fallback={<FeedbackWorkspacePending />}>
       <Panel />

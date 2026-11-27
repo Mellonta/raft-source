@@ -70,6 +70,7 @@
     "EMBED_DOMAIN": "",
     // Raft's API, for /internal/artifacts-content/*; required.
     "RAFT_API_URL": "",
+    "RAFT_PRIVACY_MODE": "",
     // The account's R2 S3 endpoint, an origin (https://<account id>.r2.cloudflarestorage.com); required.
     "R2_ENDPOINT": "",
     // The platform's app-content bucket Raft writes Artifact files to (the server's

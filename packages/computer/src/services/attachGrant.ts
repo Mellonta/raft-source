@@ -28,8 +28,8 @@ import {
   readServerAttachment,
   resolveAttachedServerSlug,
 } from "../serverState";
-import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
-import { readUserSessionAuth } from "../lib/userSession";
+import { canonicalizeServerUrl } from "../serverUrl";
+import { resolveDeviceApprovalServerUrl } from "../lib/userSession";
 import { ComputerServiceError } from "./errors";
 import {
   attach as attachWithUserSession,
@@ -120,9 +120,7 @@ export async function approveMachine(
     }
   }
 
-  // The saved session (if any, from an older `login`) is read for its server
-  // URL only, never refreshed or written here.
-  const baseUrl = resolveServerUrl(input.serverUrl, (await readUserSessionAuth(slockHome)).serverUrl, resolveServerUrlEnv());
+  const baseUrl = await resolveDeviceApprovalServerUrl(slockHome, input.serverUrl);
   const computerName = input.name?.trim() || deriveDefaultComputerName();
   const grant: ComputerAttachGrantRequest = {
     kind: "computer_attach",

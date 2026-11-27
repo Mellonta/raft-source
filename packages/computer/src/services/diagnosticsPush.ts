@@ -167,7 +167,7 @@ export interface DiagnosticsPushOptions {
   /** Overrides every attachment's receiver (tests). */
   workerUrl?: string;
   fetchImpl?: FetchLike;
-  /** RAFT_PRIVACY_MODE; default: the Computer's own env (an invalid value counts as on). */
+  /** A caller may also disable uploads independently of the Computer's environment. */
   privacyMode?: boolean;
 }
 
@@ -666,7 +666,7 @@ export async function diagnosticsPush(
   // nothing to attach to anyway. Honest closed-reason instead of writing
   // a marker that will sit on disk forever. RAFT_PRIVACY_MODE likewise: no
   // marker, and no forced upload to Raft's receiver.
-  if (process.env.RAFT_COMPUTER_LOCAL_TRACE === "0" || (options.privacyMode ?? localPrivacyModeOn())) {
+  if (process.env.RAFT_COMPUTER_LOCAL_TRACE === "0" || (options.privacyMode === true || localPrivacyModeOn())) {
     return { status: "failed", reason: "UPLOAD_DISABLED" };
   }
 

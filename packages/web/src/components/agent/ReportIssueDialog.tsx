@@ -1,4 +1,5 @@
 import { feedbackTicketPath } from "../../feedback/feedbackPaths";
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 import { Card, Checkbox, Textarea, Button } from "@botiverse/raft-ui";
 import { FEEDBACK_REPORT_SESSION_RECORD_EVENT } from "@botiverse/raft-shared";
 import type { FeedbackReportSessionRecordEvent } from "@botiverse/raft-shared";
@@ -246,7 +247,7 @@ export default function ReportIssueDialog({
     if (!consented || loading) return;
     // RAFT_PRIVACY_MODE: nothing goes to Raft's receiver unless the server has
     // answered that privacy mode is off (still unknown counts as not off).
-    if (!feedbackExportUrl || privacyModeState() !== "off") {
+    if (browserPrivacyMode() || !feedbackExportUrl || privacyModeState() !== "off") {
       setError(formatMessage({ id: "agent.reportIssue.exportNotConfigured" }));
       return;
     }

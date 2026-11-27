@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 // Public Server visit counts (RFC-067 registry: public_page_viewed,
 // public_page_channel_opened, public_page_thread_opened). Not a product-event batch: the server records these
 // for logged-out visitors too and decides who the visitor is
@@ -30,7 +31,7 @@ let landingViewRecorded = false;
 
 /** Call once from main.tsx, before the first render. */
 export function captureLandingPage(): void {
-  if (landingPage || typeof window === "undefined") return;
+  if (browserPrivacyMode() || landingPage || typeof window === "undefined") return;
   landingPage = {
     pathname: window.location.pathname,
     search: window.location.search,
@@ -81,6 +82,7 @@ export function recordPublicVisit(
   channelId?: string,
   threadChannelId?: string,
 ): void {
+  if (browserPrivacyMode()) return;
   // A signed-in visitor's token lets the server tell members from
   // non-members; the client never claims either.
   const token = globalThis.localStorage?.getItem(TOKEN_KEY) ?? null;

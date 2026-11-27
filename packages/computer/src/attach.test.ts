@@ -190,7 +190,7 @@ test("attach: approval prompt, dvat_ bearer, and nothing secret printed; the sav
 });
 
 test("attach (user-session path, setup's legacy branch): unknown slug response is rendered as server-not-found, not disabled surface", async () => {
-  await withHome(async () => {
+  await withHome(async (home) => {
     await withServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/api/computer/attach") {
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -199,6 +199,9 @@ test("attach (user-session path, setup's legacy branch): unknown slug response i
       }
       res.writeHead(404).end();
     }, async (baseUrl) => {
+      await writeFile(join(home, "computer", "user-session.json"), JSON.stringify({
+        kind: "user-session", accessToken: "user-token", serverUrl: baseUrl,
+      }));
       const cap = captureOut();
       try {
         await assert.rejects(

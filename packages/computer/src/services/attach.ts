@@ -96,8 +96,10 @@ function attachNotAuthorizedMessage(
   slugForServer: string,
   slockHome: string,
   identity: UserSessionIdentity | null,
+  serverUrl: string,
 ): string {
   return accountUnavailableMessage({
+    serverUrl,
     serverLabel: formatServerSlugDisplay(slugForServer),
     serverSlug: slugForServer,
     slockHome,
@@ -278,7 +280,7 @@ export async function attach(input: AttachInput, options: AttachOptions = {}): P
       `No user session at ${sessionFile}. Run \`raft-computer attach ${formatServerSlugDisplay(slugForServer)}\` to approve this machine instead.`,
     );
   }
-  if (session.status === "not_logged_in" && session.reason === "invalid") {
+  if (session.status === "not_logged_in" && (session.reason === "invalid" || session.reason === "server_origin_mismatch")) {
     throw new ComputerServiceError(
       "INVALID_USER_SESSION",
       `User session at ${sessionFile} is invalid. Run \`raft-computer attach ${formatServerSlugDisplay(slugForServer)}\` to approve this machine instead.`,
@@ -318,7 +320,7 @@ export async function attach(input: AttachInput, options: AttachOptions = {}): P
   if (attached.status === "not_authorized") {
     throw new ComputerServiceError(
       "ATTACH_NOT_AUTHORIZED",
-      attachNotAuthorizedMessage(slugForServer, slockHome, await readUserSessionIdentity(slockHome)),
+      attachNotAuthorizedMessage(slugForServer, slockHome, await readUserSessionIdentity(slockHome), baseUrl),
     );
   }
   if (attached.status === "requires_admin") {

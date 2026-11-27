@@ -45,11 +45,18 @@ test("render adds one environment with the deploy's names and keeps the committe
     R2_BUCKET: "objects-example",
     R2_ENDPOINT: VALUES.CONTENT_WORKER_R2_ENDPOINT,
     RAFT_API_URL: "https://api.example.com",
+    RAFT_PRIVACY_MODE: "0",
   });
   assert.equal("routes" in rendered || "routes" in env, false, "routes are never declared");
   assert.equal(rendered.workers_dev, true);
   assert.equal(rendered.preview_urls, false);
   assert.throws(() => deployEnvOf(rendered, "production"), /exactly the environment production/);
+});
+
+test("the private deployment propagates the Worker binding and refuses the hosted API", () => {
+  const vars = { ...VALUES, RAFT_PRIVACY_MODE: "1" };
+  assert.equal(deployEnvOf(renderDeployConfig(BASE, "production", vars), "production").vars.RAFT_PRIVACY_MODE, "1");
+  assert.throws(() => renderDeployConfig(BASE, "production", { ...vars, CONTENT_WORKER_RAFT_API_URL: "https://api.raft.build" }), /privacy_mode/i);
 });
 
 test("render refuses a missing or malformed value, the placeholder id, and a content domain over the app", () => {
@@ -179,6 +186,7 @@ test("the readback selects the run's deployment and requires exactly the rendere
     { name: "R2_BUCKET", type: "plain_text", text: "objects-example" },
     { name: "R2_ENDPOINT", type: "plain_text", text: VALUES.CONTENT_WORKER_R2_ENDPOINT },
     { name: "RAFT_API_URL", type: "plain_text", text: "https://api.example.com" },
+    { name: "RAFT_PRIVACY_MODE", type: "plain_text", text: "0" },
   ];
   const secrets = REQUIRED_SECRETS.map((name) => ({ name, type: "secret_text" }));
   const version = (list: object[]) =>

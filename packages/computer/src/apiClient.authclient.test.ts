@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from "undici";
 
-import { AuthClient, DeviceAuthClient, ServersClient } from "./apiClient";
+import { AuthClient, ComputerAttachClient, DeviceAuthClient, ServersClient } from "./apiClient";
 import { COMPUTER_VERSION } from "./version";
 import { ComputerLifecycleClient } from "./localLifecycleIntents";
 
@@ -336,4 +336,19 @@ test("device authorize, poll and loopback redeem name the Computer, its version,
   } finally {
     await new Promise<void>((resolve, reject) => { server.close((error) => error ? reject(error) : resolve()); });
   }
+});
+
+test("legacy adoption never follows a redirect carrying the machine credential", async () => {
+  const origin = "https://raft.example";
+  let forwarded = false;
+  await withMockAgent(origin, pool => {
+    pool.intercept({ path: "/api/computer/adopt-legacy", method: "POST" })
+      .reply(307, "", { headers: { location: "/redirected" } });
+    pool.intercept({ path: "/redirected", method: "POST" })
+      .reply(() => { forwarded = true; return { statusCode: 200, data: "{}" }; });
+  }, async () => {
+    const result = await new ComputerAttachClient(origin, "user-fixture").adoptLegacy("machine-fixture");
+    assert.equal(result.status, "network_failed");
+    assert.equal(forwarded, false);
+  });
 });

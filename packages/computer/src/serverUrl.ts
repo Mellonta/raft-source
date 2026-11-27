@@ -1,11 +1,34 @@
+import { assertPrivacyServiceUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 export const DEFAULT_SLOCK_SERVER_URL = "https://api.raft.build";
 export const LEGACY_PRODUCTION_SERVER_URL = "https://api.slock.ai";
 export const SLOCK_SERVER_URL_ENV = "SLOCK_SERVER_URL";
 export const RAFT_SERVER_URL_ENV = "RAFT_SERVER_URL";
 
-export function canonicalizeServerUrl(serverUrl: string): string {
+/** Never place workspace identifiers on hosted links in private mode. */
+export function computerPortalOrigin(serverUrl?: string): string {
+  if (!privacyModeEnabled()) return "https://app.raft.build";
+  if (!serverUrl) return "";
+  assertPrivacyServiceUrl(serverUrl);
+  return new URL(serverUrl).origin;
+}
+
+export function normalizeServerUrl(serverUrl: string): string {
   const trimmed = serverUrl.trim().replace(/\/+$/, "");
   return trimmed === LEGACY_PRODUCTION_SERVER_URL ? DEFAULT_SLOCK_SERVER_URL : trimmed;
+}
+
+/** A saved credential can only be used with the deployment that issued it. */
+export function sessionMatchesServer(savedUrl: unknown, requestedUrl?: string): savedUrl is string {
+  if (typeof savedUrl !== "string" || !savedUrl.trim()) return false;
+  const saved = URL.parse(normalizeServerUrl(savedUrl));
+  if (!saved || !["http:", "https:"].includes(saved.protocol) || saved.username || saved.password || saved.search || saved.hash) return false;
+  return !requestedUrl?.trim() || URL.parse(normalizeServerUrl(requestedUrl))?.href === saved.href;
+}
+
+export function canonicalizeServerUrl(serverUrl: string): string {
+  const url = normalizeServerUrl(serverUrl);
+  assertPrivacyServiceUrl(url);
+  return url;
 }
 
 export function resolveServerUrl(...candidates: Array<string | undefined | null>): string {
@@ -13,6 +36,7 @@ export function resolveServerUrl(...candidates: Array<string | undefined | null>
     const value = candidate?.trim();
     if (value) return canonicalizeServerUrl(value);
   }
+  if (privacyModeEnabled()) throw new Error("RAFT_PRIVACY_MODE requires --server-url or RAFT_SERVER_URL.");
   return DEFAULT_SLOCK_SERVER_URL;
 }
 

@@ -20,6 +20,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { assertPrivacyServiceUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 
 /** The Worker's secrets (src/config.ts CheckWorkerEnv), set by the deployment, never by this script. */
 export const REQUIRED_SECRETS = ["ARTIFACTS_CHECK_WORKER_TOKEN"] as const;
@@ -36,6 +37,7 @@ type Json = Record<string, unknown>;
 export interface DeployEnv {
   name: string;
   apiOrigin: string;
+  privacyMode?: string;
   crons: string[];
   /** Warm browsers (src/pool.ts): at most one environment "on" per Cloudflare account. */
   browserPool: PoolValue;
@@ -58,20 +60,27 @@ function parseJson(text: string, label: string): unknown {
 const isRecord = (value: unknown): value is Json => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** The bindings a section declares must be exactly the browser and the vars (a new one needs the deploy's readback too). */
-function checkSection(section: Json, label: string): { apiOrigin: string; crons: string[]; browserPool: PoolValue } {
+function checkSection(section: Json, label: string): Omit<DeployEnv, "name"> {
   for (const key of ["routes", "route", "r2_buckets", "d1_databases", "kv_namespaces", "durable_objects", "services", "queues", "hyperdrive", "analytics_engine_datasets"]) {
     if (key in section) throw new Error(`${label} declares ${key}, which the check Worker has no use for`);
   }
   const browser = section.browser;
   if (!isRecord(browser) || browser.binding !== BROWSER_BINDING || Object.keys(browser).length !== 1) throw new Error(`${label} must bind the browser as ${BROWSER_BINDING}`);
   const vars = section.vars;
-  if (!isRecord(vars) || Object.keys(vars).sort().join(",") !== VARS.join(",")) throw new Error(`${label} vars must be exactly ${VARS.join(", ")}`);
+  if (!isRecord(vars)) throw new Error(`${label} vars are missing`);
+  const { RAFT_PRIVACY_MODE: privacyMode, ...required } = vars;
+  if (Object.keys(required).sort().join(",") !== VARS.join(",")) throw new Error(`${label} vars must be exactly ${VARS.join(", ")} with optional RAFT_PRIVACY_MODE`);
+  if (privacyMode !== undefined) {
+    if (typeof privacyMode !== "string") throw new Error(`${label} RAFT_PRIVACY_MODE must be a string`);
+    const env = { RAFT_PRIVACY_MODE: privacyMode };
+    if (privacyModeEnabled(env) && vars.RAFT_API_ORIGIN) assertPrivacyServiceUrl(String(vars.RAFT_API_ORIGIN), env);
+  }
   const browserPool = vars.CHECK_BROWSER_POOL;
   if (typeof browserPool !== "string" || !(POOL_VALUES as readonly string[]).includes(browserPool)) throw new Error(`${label} CHECK_BROWSER_POOL must be "on" or "off"`);
   const triggers = section.triggers;
   const crons = isRecord(triggers) && Array.isArray(triggers.crons) ? triggers.crons : null;
   if (crons === null || crons.length !== 1 || typeof crons[0] !== "string") throw new Error(`${label} must have exactly one cron trigger`);
-  return { apiOrigin: String(vars.RAFT_API_ORIGIN), crons: crons as string[], browserPool: browserPool as PoolValue };
+  return { ...(privacyMode === undefined ? {} : { privacyMode }), apiOrigin: String(vars.RAFT_API_ORIGIN), crons: crons as string[], browserPool: browserPool as PoolValue };
 }
 
 /** wrangler.jsonc checked, and the environment `envName` of it. */
@@ -90,14 +99,15 @@ export function describeEnv(baseText: string, envName: string): DeployEnv {
   if (!isRecord(section)) throw new Error(`wrangler.jsonc env.${envName} is not an object`);
   const name = section.name;
   if (typeof name !== "string" || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) throw new Error(`env.${envName}.name is not a Worker name`);
-  const { apiOrigin, crons, browserPool } = checkSection(section, `env.${envName}`);
+  const settings = checkSection(section, `env.${envName}`);
+  const { apiOrigin, browserPool } = settings;
   // Browser Rendering's sessions are one list per Cloudflare account, and a pooling Worker takes any
   // free one. So of the environments of one account at most one pools, and never staging.
   if (envName === "staging" && browserPool !== "off") throw new Error("env.staging CHECK_BROWSER_POOL must be off (it shares an account with production)");
   const pooling = DEPLOY_ENVS.filter((each) => isRecord(envs[each]) && isRecord((envs[each] as Json).vars) && ((envs[each] as Json).vars as Json).CHECK_BROWSER_POOL === "on");
   if (pooling.length > 1) throw new Error("at most one environment may have CHECK_BROWSER_POOL on while they share an account");
   if (!URL.canParse(apiOrigin) || new URL(apiOrigin).protocol !== "https:" || new URL(apiOrigin).origin !== apiOrigin) throw new Error(`env.${envName} RAFT_API_ORIGIN is not an https origin`);
-  return { name, apiOrigin, crons, browserPool };
+  return { name, ...settings };
 }
 
 export function verifySecretList(text: string): void {
@@ -132,12 +142,16 @@ export function verifyVersion(text: string, expected: { env: DeployEnv; versionI
   const bindings = (version.resources as Json | undefined)?.bindings;
   if (!Array.isArray(bindings)) throw new Error("version bindings missing");
   const plain = (bindings as Binding[]).filter((each) => each.type !== "secret_text");
-  const want = [BROWSER_BINDING, ...VARS].sort();
+  const privacyMode = expected.env.privacyMode;
+  const want = [BROWSER_BINDING, ...VARS, ...(privacyMode === undefined ? [] : ["RAFT_PRIVACY_MODE"])].sort();
   const have = plain.map((each) => String(each.name)).sort();
   if (have.join(",") !== want.join(",")) throw new Error(`binding set mismatch: expected ${want.join(", ")}; found ${have.join(", ")}`);
   if (plain.filter((each) => each.name === BROWSER_BINDING && each.type === "browser").length !== 1) throw new Error(`expected one browser binding named ${BROWSER_BINDING}`);
   const origin = plain.filter((each) => each.name === "RAFT_API_ORIGIN" && each.type === "plain_text");
   if (origin.length !== 1 || origin[0]!.text !== expected.env.apiOrigin) throw new Error("RAFT_API_ORIGIN readback mismatch");
+  if (privacyMode !== undefined && !plain.some(each => each.name === "RAFT_PRIVACY_MODE" && each.type === "plain_text" && each.text === privacyMode)) {
+    throw new Error("RAFT_PRIVACY_MODE readback mismatch");
+  }
   const pool = plain.filter((each) => each.name === "CHECK_BROWSER_POOL" && each.type === "plain_text");
   if (pool.length !== 1 || pool[0]!.text !== expected.env.browserPool) throw new Error("CHECK_BROWSER_POOL readback mismatch");
   const secrets = (bindings as Binding[]).filter((each) => each.type === "secret_text").map((each) => String(each.name)).sort();

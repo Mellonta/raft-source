@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { vi } from "vitest";
 import * as agent from "./agent";
 import * as app from "./app";
 import { createRaftAppClient, RaftAppError, type RaftAppErrorCode } from "./app";
@@ -418,4 +419,23 @@ test("./app is its own entry: the root and ./agent export none of it, and it exp
   }
   assert.deepEqual(Object.keys(app).sort(), ["RaftAppError", "createRaftAppClient", "createSealedInputsMemory", "openSealedInputs", "sealInputs", "sealedInputsBinding"]);
   assert.equal("asServerId" in app, false, "the unchecked brand cast stays internal");
+});
+
+test("privacy mode requires a self-hosted API before using the app token", async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(json(humanUserinfo));
+  const options = { accessToken: TOKEN, fetch };
+  try {
+    vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+    for (const baseUrl of [undefined, "https://api.raft.build", "https://api.slock.ai"]) {
+      assert.throws(() => createRaftAppClient({ ...options, baseUrl, privacyMode: false }), { code: "invalid_options" });
+    }
+    vi.stubEnv("RAFT_PRIVACY_MODE", "0");
+    assert.throws(() => createRaftAppClient({ ...options, privacyMode: true }), { code: "invalid_options" });
+    assert.equal(fetch.mock.calls.length, 0);
+    const client = createRaftAppClient({ ...options, privacyMode: true, baseUrl: "https://raft.example" });
+    await client.userinfo();
+    assert.equal(fetch.mock.calls[0]?.[0], "https://raft.example/api/oauth/userinfo");
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });

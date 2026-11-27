@@ -218,6 +218,7 @@ export class DeviceAuthClient {
   ): Promise<{ body: Record<string, unknown> | null }> {
     const res = await computerFetch(this.url("/api/auth/device/authorize"), {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json", "User-Agent": DEVICE_AUTH_USER_AGENT },
       body: JSON.stringify(payload),
     });
@@ -266,6 +267,7 @@ export class DeviceAuthClient {
     const timeout = AbortSignal.timeout(DEVICE_TOKEN_TIMEOUT_MS);
     const res = await computerFetch(this.url("/api/auth/device/token"), {
       method: "POST",
+      redirect: "error",
       // The Server records the poll's User-Agent as consumed_user_agent.
       headers: { "Content-Type": "application/json", "User-Agent": DEVICE_AUTH_USER_AGENT },
       body: JSON.stringify(payload),
@@ -405,6 +407,7 @@ export class ComputerAttachClient {
     try {
       res = await computerFetch(this.url("/api/computer/attach"), {
         method: "POST",
+        redirect: "error",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.accessToken}`,
@@ -466,6 +469,7 @@ export class ComputerAttachClient {
     try {
       res = await computerFetch(this.url("/api/computer/adopt-legacy"), {
         method: "POST",
+        redirect: "error",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.accessToken}`,
@@ -520,6 +524,7 @@ export class ComputerAttachClient {
     try {
       res = await computerFetch(this.url("/api/computer/adopt-legacy"), {
         method: "POST",
+        redirect: "error",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.accessToken}`,
@@ -578,6 +583,7 @@ export class ComputerAttachClient {
     try {
       res = await computerFetch(this.url("/api/computer/adopt-legacy"), {
         method: "POST",
+        redirect: "error",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.accessToken}`,
@@ -628,6 +634,7 @@ export class ComputerAttachClient {
   async preflight(apiKey: string): Promise<PreflightResult> {
     const res = await computerFetch(this.url("/internal/computer/preflight"), {
       method: "POST",
+      redirect: "error",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
@@ -1070,6 +1077,7 @@ export class RunnersClient {
   async stop(agentId: string): Promise<RunnerStopResult> {
     const res = await computerFetch(this.url(`/internal/computer/runners/${encodeURIComponent(agentId)}/stop`), {
       method: "POST",
+      redirect: "error",
       headers: { Authorization: `Bearer ${this.computerApiKey}`, "Content-Type": "application/json" },
       body: "{}",
     });
@@ -1195,6 +1203,7 @@ export class ComputerSelfClient {
     try {
       res = await computerFetch(this.url("/internal/computer/detach"), {
         method: "POST",
+        redirect: "error",
         headers: { Authorization: `Bearer ${this.computerApiKey}`, "Content-Type": "application/json" },
         body: forceAgentIds.length > 0 ? JSON.stringify({ forceAgentIds }) : "{}",
       });

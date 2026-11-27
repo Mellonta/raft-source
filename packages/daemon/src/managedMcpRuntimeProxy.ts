@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -671,6 +672,8 @@ export async function prepareManagedMcpRuntimeProxy(input: {
    */
   admit?: (snapshot: ManagedMcpRuntimeSnapshot) => boolean | Promise<boolean>;
 }): Promise<ManagedMcpRuntimeEndpoint | null> {
+  // Skip discovery as well as injection into user-managed runtimes.
+  if (privacyModeEnabled()) return null;
   if (!input.serverUrl) {
     emitManagedMcpDiscoveryWarning(input, "missing_server_url");
     return null;

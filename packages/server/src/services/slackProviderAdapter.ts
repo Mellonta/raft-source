@@ -3,6 +3,8 @@ import type { SlackLifecycleMemberProfile } from "./slackChannelLifecycleObserva
 import { parseSlackHistoryCursor, parseSlackReconciliationScan, type SlackReconciliationScan, type SlackReconciliationUnconfirmableReason } from "./slackReconciliationScan";
 import { CONFIRMED_THREAD_ROOT_MISSING, type ExternalProviderPreparation } from "./externalProviderPreparation";
 import { createHash, randomUUID } from "node:crypto";
+import { isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
+import { getAppUrl } from "../config/appUrl";
 import {
   clearClockTimeout,
   currentDate,
@@ -824,13 +826,16 @@ function buildPostMessageRequest(input: {
       deliveryId: input.dispatch.deliveryId,
       reconciliationMarker: input.dispatch.reconciliationMarker,
       sourceMessageId: snapshot.sourceMessageId,
-      sourcePermalink: snapshot.sourcePermalink,
+      sourcePermalink: privacyModeEnabled()
+        ? snapshot.sourcePermalink.replace("https://app.slock.ai/", getAppUrl() + "/")
+        : snapshot.sourcePermalink,
       senderType: snapshot.senderType,
       connectionEpoch: authority.connectionEpoch,
       bindingEpoch: authority.bindingEpoch,
     }),
   };
-  if (snapshot.authorPresentation.avatar) {
+  if (snapshot.authorPresentation.avatar &&
+      !(privacyModeEnabled() && isRaftVendorUrl(new URL(snapshot.authorPresentation.avatar.publicUrl)))) {
     body.icon_url = snapshot.authorPresentation.avatar.publicUrl;
   } else {
     body.icon_emoji = snapshot.senderType === "agent" ? ":robot_face:" : ":bust_in_silhouette:";

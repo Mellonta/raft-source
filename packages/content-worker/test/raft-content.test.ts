@@ -730,6 +730,8 @@ test("settings that can't be served fail closed", async (t) => {
   for (const [bindings, problem] of [
     [{ PORTHOLE_SECRET: "short" }, "PORTHOLE_SECRET"],
     [{ CONTENT_DOMAIN: "" }, "CONTENT_DOMAIN"],
+    [{ RAFT_PRIVACY_MODE: "1", RAFT_API_URL: "https://api.raft.build" }, "RAFT_PRIVACY_MODE"],
+    [{ RAFT_PRIVACY_MODE: "1", R2_ENDPOINT: "https://storage.raft.build" }, "RAFT_PRIVACY_MODE"],
     [{ RAFT_API_URL: "http://raft.example" }, "RAFT_API_URL"],
     [{ RAFT_API_TOKEN: "" }, "RAFT_API_TOKEN"],
     // No way to read R2 with the read-only token: nothing is served, rather than anything else.

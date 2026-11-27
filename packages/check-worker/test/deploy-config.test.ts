@@ -27,6 +27,15 @@ test("the committed config: two environments with their names and Raft's API ori
   assert.equal("routes" in top, false);
 });
 
+test("a private Worker deployment must use its own Raft API", () => {
+  const source = (api: string) => edited((_, env) => {
+    env.vars.RAFT_PRIVACY_MODE = "1";
+    env.vars.RAFT_API_ORIGIN = api;
+  });
+  assert.equal(describeEnv(source("https://raft.example"), "staging").privacyMode, "1");
+  assert.throws(() => describeEnv(source("https://api.raft.build"), "staging"), /privacy_mode/i);
+});
+
 test("describe refuses a config the deploy doesn't know", () => {
   const cases: Array<[(config: Config, staging: Section) => void, RegExp]> = [
     [(config) => (config.workers_dev = true), /workers_dev/],

@@ -1,3 +1,4 @@
+import { isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import type { LookupAddress } from "node:dns";
 import { lookup } from "node:dns/promises";
 import { request } from "node:https";
@@ -46,6 +47,9 @@ export class PreviewNotSentError extends Error {
 export const previewHttp: PreviewHttp = async (raw, body, assertion, options = {}) => {
   const url = publicPreviewUrl(raw);
   if (!url) throw new PreviewNotSentError("Invalid preview endpoint");
+  if (privacyModeEnabled() && isRaftVendorUrl(url)) {
+    throw new PreviewNotSentError("Privacy mode disables vendor preview endpoints");
+  }
   const budgetMs = options.timeoutMs ?? 3000;
   const deadline = Date.now() + budgetMs;
   let timer: ReturnType<typeof setTimeout> | undefined;

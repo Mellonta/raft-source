@@ -286,3 +286,5 @@ export { checkTaskAssignReason } from "./taskAssignReason";
 export { MAX_PROFILE_AVATAR_BYTES } from "./profileAvatar";
 export { CONTINUATIONS_PILOT_RUNTIMES } from "./featureFlags";
 export { formatDescriptionLinkWarnings } from "./descriptionLinkWarnings";
+
+export { assertPrivacyServiceUrl, privacyModeEnabled, rejectVendorDispatch } from "./privacyTransport";

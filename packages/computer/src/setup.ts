@@ -76,7 +76,7 @@ import { CliExit, info, present } from "./output";
 import { ComputerError } from "./lib/errors";
 import type { ComputerTraceContext, ComputerTracer } from "./lib/traceTypes";
 import { formatUpgradeLogTimestamp, resolveRaftHome, serverAttachmentPath } from "./paths";
-import { resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
+import { computerPortalOrigin, resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
 import { formatServerSlugDisplay, migrateKnownServerUrl, normalizeServerSlug, resolveAttachedServerSlug } from "./serverState";
 import {
   adoptLegacyByDaemonId as adoptLegacyByDaemonIdService,
@@ -399,10 +399,6 @@ function shortDate(raw: string | null | undefined): string {
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return raw;
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-}
-
-function appServerUrl(serverSlug: string): string {
-  return `https://app.raft.build/s/${encodeURIComponent(normalizeServerSlug(serverSlug))}/`;
 }
 
 function serverUrlHost(raw: unknown): string | null {
@@ -1283,9 +1279,11 @@ async function attachFromSetup(
   }
 }
 
-function emitSetupRunningSummary(emit: (line: string) => void, opts: SetupOptions): void {
+function emitSetupRunningSummary(emit: (line: string) => void, opts: SetupOptions, baseUrl: string): void {
   emit("Raft Computer is running. Agents can now use this computer.");
-  emit(`Next: chat with your agents at ${appServerUrl(opts.serverSlug)}`);
+  const slug = normalizeServerSlug(opts.serverSlug);
+  const chatUrl = computerPortalOrigin(baseUrl) + `/s/${encodeURIComponent(slug)}/`;
+  emit(`Next: chat with your agents at ${chatUrl}`);
   emit("(check this computer anytime with `raft-computer status`)");
 }
 
@@ -1393,6 +1391,7 @@ export async function setupCore(
   const sessionAuthForTarget = async (
     session: { accessToken: string; serverUrl?: string },
   ): Promise<LegacyAuth | "auth_required"> => {
+    if (!session.accessToken) return "auth_required";
     const baseUrl = resolveServerUrl(opts.serverUrl, session.serverUrl, resolveServerUrlEnv());
     const serversResult = await buildServers(baseUrl, session.accessToken).list();
     if (serversResult.status === "auth_required") return "auth_required";
@@ -1469,7 +1468,7 @@ export async function setupCore(
     } else {
       emit("This server does not support one-time approvals yet, so this machine signed in with a user session instead.");
     }
-    const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome));
+    const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome, opts.serverUrl));
     if (signedIn === "auth_required") {
       throw new ComputerError(
         "USER_SESSION_EXPIRED",
@@ -1488,7 +1487,7 @@ export async function setupCore(
     // removes it (#wg-device-auth:#1, Tenny 207eca94).
     if (isTty) return (legacy.auth = await approveLegacyMigration());
     let saved = false;
-    if (await hasUnexpiredUserSessionShape(slockHome)) {
+    if (await hasUnexpiredUserSessionShape(slockHome, opts.serverUrl)) {
       emit("Logging in… done (already logged in).");
       saved = true;
     } else if (await refreshSession(slockHome, opts.serverUrl)) {
@@ -1496,7 +1495,7 @@ export async function setupCore(
       saved = true;
     }
     if (saved) {
-      const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome));
+      const signedIn = await sessionAuthForTarget(await readUserSessionAuth(slockHome, opts.serverUrl));
       if (signedIn !== "auth_required") return (legacy.auth = signedIn);
       throw new ComputerError(
         "USER_SESSION_EXPIRED",
@@ -1586,7 +1585,7 @@ export async function setupCore(
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId)) {
           throw new ComputerError(
             "SETUP_MACHINE_INVALID",
-            `--machine expects the machine id shown on the web Computers page (a UUID), got: ${machineId}. Open https://app.raft.build/s/${encodeURIComponent(opts.serverSlug)}/computers and copy the id from your computer's Migrate command.`,
+            `--machine expects the machine id shown on the web Computers page (a UUID), got: ${machineId}. Open ${computerPortalOrigin(opts.serverUrl || resolveServerUrlEnv())}/s/${encodeURIComponent(normalizeServerSlug(opts.serverSlug))}/computers and copy the id from your computer's Migrate command.`,
           );
         }
         recordMigrationDecision(migrationTracer, migrationAttemptId, {
@@ -1945,7 +1944,7 @@ export async function setupCore(
   if (shouldPushMigrationDiagnosticsAfterStart) {
     await forceMigrationDiagnostics(slockHome, diagnosticsPush, emit, migrationAttemptId);
   }
-  emitSetupRunningSummary(emit, opts);
+  emitSetupRunningSummary(emit, opts, attachment.serverUrl);
   return;
   }
 }

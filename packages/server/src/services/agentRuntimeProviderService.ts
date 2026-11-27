@@ -35,6 +35,7 @@
  * (idempotency_conflict, deleted, agent_id_taken, model_locked); none means
  * "already created": only a 2xx does.
  */
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { AgentRuntimeProviderKind } from "@botiverse/raft-shared";
 import { UUID_RE } from "../lib/messageId";
@@ -203,7 +204,7 @@ export function resolveProviderConfig(
   env: NodeJS.ProcessEnv = process.env,
   target: AgentRuntimeProviderTarget = "default",
 ): ResolvedProviderConfig | null {
-  if (kind !== "antiproton") return null;
+  if (kind !== "antiproton" || privacyModeEnabled(env)) return null;
   const deploymentEnv = env.DEPLOYMENT_ENV?.trim() ?? "";
   // Check before test transport overrides too; production cannot select canary.
   if (target === "canary") {

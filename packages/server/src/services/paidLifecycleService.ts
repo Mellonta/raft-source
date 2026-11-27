@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { randomUUID } from "node:crypto";
 import { and, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
 import type Stripe from "stripe";
@@ -33,6 +34,7 @@ function providerId(value: string | { id: string } | null | undefined) {
 }
 export function paidLifecycleEnabled() {
   return (
+    !privacyModeEnabled() &&
     process.env.PAID_LIFECYCLE_EMAIL_MODE === "enabled" &&
     Boolean(process.env.RESEND_API_KEY) &&
     Boolean(

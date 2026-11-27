@@ -24,6 +24,7 @@ import type { Dispatcher } from "undici";
 import {
   FORWARDED_RESOLVE_CAPABILITY,
   guideAppCapabilities,
+  assertPrivacyServiceUrl,
   MANUAL_CONTEXT_CAPABILITY,
   PLAN_UPGRADE_CARD_CAPABILITY,
   INBOX_ITEMS_CAPABILITY,
@@ -37,7 +38,7 @@ import { buildAgentApiEventsPath } from "./agentApiPath";
 import type { AgentContext } from "./auth/env";
 import { apiFailureError, localProxyLifecycleError } from "./core/apiFailure";
 import { isHttpRedirect, requestJsonOverHttp, type JsonTransportInit, type TransportResponse } from "./httpTransport";
-import { buildFetchDispatcher, describeFetchFailure, fetchWithDispatcher } from "./proxy";
+import { buildFetchDispatcher, describeFetchFailure, fetchWithDispatcher, fetchWithVendorPolicy } from "./proxy";
 import {
   boundedOriginalMessage,
   emitCliTransportNormalizedError,
@@ -145,7 +146,9 @@ export interface BinaryResponse {
 }
 
 export class ApiClient {
-  constructor(private readonly ctx: AgentContext) {}
+  constructor(private readonly ctx: AgentContext) {
+    assertPrivacyServiceUrl(ctx.serverUrl);
+  }
 
   private usesAgentApiSurface(): boolean {
     return this.ctx.clientMode === "managed-runner" || this.ctx.clientMode === "self-hosted-runner";
@@ -352,7 +355,7 @@ export class ApiClient {
   private fetchWithTransportTrace(url: URL, pathname: string, init: ProxyAwareRequestInit): Promise<Response> {
     const { dispatcher } = init;
     return this.sendWithTransportTrace(url, pathname, () => (
-      dispatcher ? fetchWithDispatcher(url, { ...init, dispatcher }) : fetch(url, init)
+      dispatcher ? fetchWithDispatcher(url, { ...init, dispatcher }) : fetchWithVendorPolicy(url, init)
     ));
   }
 
@@ -369,6 +372,7 @@ export class ApiClient {
     pathname: string,
     send: () => Promise<R>,
   ): Promise<R> {
+    assertPrivacyServiceUrl(url);
     try {
       const res = await send();
       if (res.status >= 500) {

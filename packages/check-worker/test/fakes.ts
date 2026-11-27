@@ -260,6 +260,7 @@ function fakePage(script: PageScript, record: FakeRecord, now: () => number): Ch
 // ---- Raft ----------------------------------------------------------------------------
 
 export interface RaftCall {
+  redirect?: RequestRedirect;
   url: string;
   method: string;
   authorization: string | null;
@@ -274,7 +275,7 @@ export function fakeRaft(options: { leases: Array<ArtifactCheckLease | number | 
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const headers = new Headers(init?.headers);
-    calls.push({ url, method: init?.method ?? "GET", authorization: headers.get("authorization"), form: init?.body instanceof FormData ? init.body : null });
+    calls.push({ url, redirect: init?.redirect, method: init?.method ?? "GET", authorization: headers.get("authorization"), form: init?.body instanceof FormData ? init.body : null });
     if (url.endsWith("/internal/artifacts-check/lease")) {
       const next = leases.shift() ?? 204;
       if (next instanceof Error) throw next;

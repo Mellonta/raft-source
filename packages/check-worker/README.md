@@ -295,6 +295,7 @@ and a report over 64 KiB loses blocked addresses, then console errors, from the 
 top level is no deployment: its `RAFT_API_ORIGIN` is empty, so it leases nothing.
 
 - `BROWSER`: the Browser Rendering binding.
+- For a self-hosted API, set `RAFT_PRIVACY_MODE` to `"1"` in the same environment’s Wrangler vars to block Raft vendor services.
 - `RAFT_API_ORIGIN` (var): Raft's API, an https origin.
 - `CHECK_BROWSER_POOL` (var): `"on"` or `"off"`, warm browsers ([above](#warm-browsers));
   production `"on"`, staging and the top level `"off"`: at most one pooling environment per

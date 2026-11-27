@@ -3,6 +3,7 @@
 // needs the origin (artifactOpenIntent's preconnect) does not pull Porthole
 // into the app shell.
 
+import { browserBlocksVendorUrl } from "@botiverse/raft-shared/src/browserPrivacy";
 import type { ArtifactId } from "@botiverse/raft-shared";
 
 /** The label prefix the content Worker serves Artifact `pt_<uuid>` on: `w-<uuid>.<content domain>`. */
@@ -53,7 +54,7 @@ export function artifactsContentDomain(): string | null {
   } catch {
     return null;
   }
-  if (parsed.host !== domain) return null;
+  if (parsed.host !== domain || browserBlocksVendorUrl(parsed)) return null;
   // At least a registrable domain (never a bare TLD such as `com`).
   if (parsed.hostname.split(".").length < 2) return null;
   return domain;

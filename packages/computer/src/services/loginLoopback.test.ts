@@ -3,6 +3,7 @@
 // the listener → token with requestId + code + PKCE verifier; and each way it
 // falls back to a device code.
 import assert from "node:assert/strict";
+import { vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createServer, request, type Server } from "node:http";
 
@@ -31,6 +32,7 @@ interface FakeServer {
 async function startServer(opts: {
   /** Old server: ignores `loopback` and answers with a device code. */
   ignoresLoopback?: boolean;
+  approvalUrl?: string;
   /** Refuses `loopback` with this code. */
   refuseLoopback?: string;
   /** The loopback token answer (default: checks the PKCE verifier, then the attach answer). */
@@ -53,7 +55,7 @@ async function startServer(opts: {
         }
         res.statusCode = 201;
         if (body.loopback && !opts.ignoresLoopback) {
-          res.end(JSON.stringify({ requestId: "req-1", approvalUrl: "https://app.example/login/device?request=req-1", expiresIn: 600 }));
+          res.end(JSON.stringify({ requestId: "req-1", approvalUrl: opts.approvalUrl ?? "https://app.example/login/device?request=req-1", expiresIn: 600 }));
           return;
         }
         res.end(JSON.stringify(DEVICE_ANSWER));
@@ -405,4 +407,21 @@ test("approval page: only Raft's /login/device over https (http only for a local
   assert.equal(acceptableApprovalUrl("javascript:alert(1)", api), null);
   assert.equal(acceptableApprovalUrl("http://localhost:5173/login/device?request=r1", "http://localhost:3001"), "http://localhost:5173/login/device?request=r1");
   assert.equal(acceptableApprovalUrl("http://evil.example/login/device", "http://localhost:3001"), null);
+});
+
+test("a private Computer falls back to its own device flow before opening a hosted URL", async () => {
+  const server = await startServer({ approvalUrl: "https://app.raft.build/login/device?request=fixture" });
+  const openBrowser = vi.fn(async () => false);
+  try {
+    vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+    const events: ComputerApiEvent[] = [];
+    await runDeviceAuthorization(server.baseUrl, GRANT, { onEvent: event => events.push(event), loopback: { openBrowser } });
+    assert.deepEqual(modes(events), ["device_code:server_unsupported"]);
+    assert.equal(openBrowser.mock.calls.length, 0);
+    assert.ok(!JSON.stringify(events).includes("raft.build"));
+    assert.equal(server.tokenBodies.length, 1);
+  } finally {
+    vi.unstubAllEnvs();
+    await server.close();
+  }
 });

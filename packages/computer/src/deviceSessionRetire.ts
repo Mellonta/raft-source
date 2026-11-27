@@ -64,7 +64,7 @@ import { withComputerMutationLock } from "./concurrency";
 import { computerDir, userSessionPath } from "./paths";
 import { computerFetch } from "./proxy";
 import { listAttachedServerIds, readServerAttachment } from "./serverState";
-import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
+import { canonicalizeServerUrl, sessionMatchesServer } from "./serverUrl";
 
 export const RETIRE_SESSION_PATH = "/api/computer/retire-session";
 export const COMPUTER_KEY_HEADER = "X-Raft-Computer-Key";
@@ -167,7 +167,7 @@ interface SessionSnapshot {
   raw: string;
   accessToken: string;
   refreshToken?: string;
-  serverUrl?: string;
+  serverUrl: string;
 }
 
 async function readSnapshot(slockHome: string): Promise<SessionSnapshot | "missing" | "invalid"> {
@@ -185,19 +185,15 @@ async function readSnapshot(slockHome: string): Promise<SessionSnapshot | "missi
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "invalid";
   const session = parsed as Record<string, unknown>;
-  if (session.kind !== "user-session" || typeof session.accessToken !== "string" || session.accessToken.length === 0) {
+  if (!sessionMatchesServer(session.serverUrl) || session.kind !== "user-session" || typeof session.accessToken !== "string" || session.accessToken.length === 0) {
     return "invalid";
   }
   return {
     raw,
     accessToken: session.accessToken,
     ...(typeof session.refreshToken === "string" && session.refreshToken.length > 0 ? { refreshToken: session.refreshToken } : {}),
-    ...(typeof session.serverUrl === "string" && session.serverUrl.trim() ? { serverUrl: session.serverUrl } : {}),
+    serverUrl: canonicalizeServerUrl(session.serverUrl),
   };
-}
-
-function sessionBaseUrl(snapshot: SessionSnapshot): string {
-  return resolveServerUrl(snapshot.serverUrl, resolveServerUrlEnv());
 }
 
 async function defaultWithLock<T>(slockHome: string, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -336,7 +332,7 @@ export async function retireOwnDeviceSession(
     if (peek === "missing") return done("no_session");
     if (deps.signal?.aborted) return done("cancelled");
     if (peek === "invalid") return done("session_invalid");
-    if ((await attachedKeysFor(slockHome, sessionBaseUrl(peek))).length === 0) return done("no_attached_key");
+    if ((await attachedKeysFor(slockHome, peek.serverUrl)).length === 0) return done("no_attached_key");
 
     const withLock = deps.withLock ?? defaultWithLock;
     let locked = false;
@@ -366,7 +362,7 @@ export async function retireOwnDeviceSession(
     const snapshot = await readSnapshot(slockHome);
     if (snapshot === "missing") return done("no_session");
     if (snapshot === "invalid") return done("session_invalid");
-    const baseUrl = sessionBaseUrl(snapshot);
+    const baseUrl = snapshot.serverUrl;
     const keys = await attachedKeysFor(slockHome, baseUrl);
     if (keys.length === 0) return done("no_attached_key");
 

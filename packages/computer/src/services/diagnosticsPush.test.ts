@@ -297,6 +297,7 @@ test("diagnosticsPush: UPLOAD_DISABLED under RAFT_PRIVACY_MODE, no marker and no
     try {
       const r = await diagnosticsPush({ slockHome: home }, {
         forceUploadNow: true,
+        privacyMode: false,
         fetchImpl: async () => { calls += 1; return new Response("{}"); },
       });
       assert.equal(r.status, "failed");
@@ -754,4 +755,15 @@ test("diagnosticsPush: orphan END marker is masked in the uploaded body (task263
     // marker and does not swallow the rest of the log.
     assert.ok(uploadedText.includes("runner continued"), "text after END must survive");
   });
+});
+
+test("RAFT_PRIVACY_MODE refuses even forced diagnostics before reading or contacting anything", async () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+  vi.stubEnv("RAFT_COMPUTER_LOCAL_TRACE", "1");
+  const fetchImpl = vi.fn<typeof fetch>();
+  try {
+    assert.deepEqual(await diagnosticsPush({ slockHome: "/does-not-exist" }, { forceUploadNow: true, workerUrl: "https://fixture.invalid", fetchImpl }),
+      { status: "failed", reason: "UPLOAD_DISABLED" });
+    assert.equal(fetchImpl.mock.calls.length, 0);
+  } finally { vi.unstubAllEnvs(); }
 });

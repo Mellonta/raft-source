@@ -28,10 +28,12 @@ test("lease: POST with the Worker's bearer to /internal/artifacts-check/lease; 2
   assert.equal(raft.calls.length, 1);
   assert.equal(raft.calls[0]!.url, `${API_ORIGIN}/internal/artifacts-check/lease`);
   assert.equal(raft.calls[0]!.method, "POST");
+  assert.equal(raft.calls[0]!.redirect, "manual");
   assert.equal(raft.calls[0]!.authorization, `Bearer ${WORKER_TOKEN}`);
 });
 
 test("lease: 204 is nothing to run; 401/403 refused; 5xx, 429 and a network error unavailable; other answers invalid", async () => {
+  assert.deepEqual(await requestLease(apiWith(fakeRaft({ leases: [307] }))), { kind: "invalid", status: 307 });
   assert.deepEqual(await requestLease(apiWith(fakeRaft({ leases: [204] }))), { kind: "none" });
   assert.deepEqual(await requestLease(apiWith(fakeRaft({ leases: [401] }))), { kind: "refused", status: 401 });
   assert.deepEqual(await requestLease(apiWith(fakeRaft({ leases: [403] }))), { kind: "refused", status: 403 });
@@ -95,6 +97,7 @@ test("result: POST to …/:checkId/result with the bearer; 200 recorded, 409 con
   assert.deepEqual(await postResult(apiWith(raft), okReport(), { desktop: SPLIT_PNG }), { kind: "recorded", status: "done" });
   assert.equal(raft.calls[0]!.url, `${API_ORIGIN}/internal/artifacts-check/${leaseFor().checkId}/result`);
   assert.equal(raft.calls[0]!.method, "POST");
+  assert.equal(raft.calls[0]!.redirect, "manual");
   assert.equal(raft.calls[0]!.authorization, `Bearer ${WORKER_TOKEN}`);
   assert.ok(raft.calls[0]!.form?.get("desktop"));
 

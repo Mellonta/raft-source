@@ -57,6 +57,7 @@
  * - Porthole 0.15.2 (src/raftContentDisplays.ts says why): the kit that serves
  *   the shell and its runtime is the displays' own.
  */
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyTransport";
 import {
   contentHostFor,
   d1TicketStore,
@@ -153,6 +154,7 @@ export type RaftContentEnv = {
   PORTHOLE_SECRET?: string;
   /** Raft's API, for the internal routes (`https://…`; http only on loopback). */
   RAFT_API_URL?: string;
+  RAFT_PRIVACY_MODE?: string;
   /** The Worker's token to Raft (Raft's ARTIFACTS_CONTENT_RAFT_TOKENS lists it). */
   RAFT_API_TOKEN?: string;
   /**
@@ -365,6 +367,7 @@ function raftApi(env: RaftContentEnv): string {
   } catch {
     throw new Error("RAFT_API_URL is not configured");
   }
+  assertPrivacyServiceUrl(url, { RAFT_PRIVACY_MODE: env.RAFT_PRIVACY_MODE });
   const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
     throw new Error("RAFT_API_URL must be https");
@@ -386,6 +389,7 @@ function r2Settings(env: RaftContentEnv): R2ReadSettings {
   } catch {
     throw new Error("R2_ENDPOINT is not configured");
   }
+  assertPrivacyServiceUrl(url, { RAFT_PRIVACY_MODE: env.RAFT_PRIVACY_MODE });
   const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("R2_ENDPOINT must be https");
   if (url.username !== "" || url.password !== "" || url.pathname !== "/" || url.search !== "" || url.hash !== "")

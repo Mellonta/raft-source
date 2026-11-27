@@ -98,13 +98,14 @@ export function parseLease(value: unknown): ArtifactCheckLease | null {
 const headersOf = (api: RaftApi) => ({ authorization: `Bearer ${api.token}` });
 const transient = (status: number) => status === 0 || status === 429 || status >= 500;
 
-/** POST …/lease. */
+/** The Worker uses manual redirect handling so a redirect cannot replay a credentialed POST. */
 export async function requestLease(api: RaftApi): Promise<LeaseAnswer> {
   let response: Response;
   try {
     response = await api.fetch(`${api.origin}${artifactCheckWorkerPaths.lease}`, {
       method: "POST",
       headers: headersOf(api),
+      redirect: "manual",
       signal: AbortSignal.timeout(LEASE_TIMEOUT_MS),
     });
   } catch {
@@ -152,6 +153,7 @@ export async function postResult(api: RaftApi, report: ArtifactCheckReport, shot
     response = await api.fetch(`${api.origin}${artifactCheckWorkerPaths.result(report.checkId)}`, {
       method: "POST",
       headers: headersOf(api),
+      redirect: "manual",
       body: resultForm(report, shots),
       signal: AbortSignal.timeout(RESULT_TIMEOUT_MS),
     });

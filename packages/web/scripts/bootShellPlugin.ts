@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import postcss from "postcss";
 import type { Plugin, ResolvedConfig } from "vite";
 import { BOOT_LOCALE_CATALOGS_ID, BOOT_LOCALE_RULES, BOOT_PREFETCH_CONFIG_ID, BOOT_SIGN_IN_FILES_ID, buildBootInlineScript } from "../src/boot/bootInlineScript";
+import { isRaftVendorUrl } from "../../shared/src/vendorUrl";
 import { deriveRuntimeEndpoints } from "../src/runtimeEndpoints";
 import { resolveWebAppVersion } from "../src/utils/webAppVersion";
 import { COLUMN_BOUNDS } from "../src/lib/panelBounds";
@@ -91,11 +92,14 @@ export function injectBootScript(html: string, inlineScript: string): string {
  */
 export function bootPrefetchConfig(env: Record<string, string | undefined>): { api: string; version: string; preconnect: string | null } {
   const compiledOrigin = env.VITE_API_URL?.replace(/\/$/, "") ?? "";
+  // A stale vendor API in a self-hosted bundle must never receive a token
+  // or a preconnect before the page discovers its deployment privacy setting.
+  const deferVendor = Boolean(compiledOrigin && isRaftVendorUrl(new URL(compiledOrigin)));
   const { apiBase } = deriveRuntimeEndpoints(compiledOrigin, "");
   return {
-    api: apiBase,
+    api: deferVendor ? "" : apiBase,
     version: resolveWebAppVersion({ VITE_APP_VERSION: env.VITE_APP_VERSION, VITE_DEPLOYMENT_ENV: env.VITE_DEPLOYMENT_ENV, VITE_COMMIT_SHA: env.VITE_COMMIT_SHA }),
-    preconnect: compiledOrigin ? new URL(compiledOrigin).origin : null,
+    preconnect: compiledOrigin && !deferVendor ? new URL(compiledOrigin).origin : null,
   };
 }
 

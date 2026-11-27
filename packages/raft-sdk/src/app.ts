@@ -10,6 +10,7 @@
 //
 // Experimental: RFC 079 is still settling, so the shape may change in a minor
 // release until account mode ships.
+import { isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { fetchWithoutRedirect } from "@botiverse/raft-shared/src/fetchWithoutRedirect";
 import { asServerId, type ServerId } from "@botiverse/raft-shared/src/brandedIds";
 
@@ -98,8 +99,10 @@ function retryAfterSecondsOf(header: string | null): number {
 export interface CreateRaftAppClientOptions {
   /** The person's (or agent's) Login with Raft access token. Never logged or put in an error. */
   accessToken: string;
-  /** Raft API origin. Defaults to `https://api.raft.build`; a trailing slash is fine. */
+  /** Raft API origin. Required in privacy mode. Otherwise defaults to `https://api.raft.build`. */
   baseUrl?: string;
+  /** Enable the self-hosted vendor policy in runtimes without process.env. */
+  privacyMode?: boolean;
   /** fetch implementation (tests, proxies, timeouts). Defaults to the global fetch. */
   fetch?: typeof fetch;
 }
@@ -203,7 +206,14 @@ export function createRaftAppClient(options: CreateRaftAppClientOptions): RaftAp
   if (typeof accessToken !== "string" || accessToken.length === 0 || /\s/.test(accessToken)) {
     throw new RaftAppError("invalid_options", "accessToken must be the Login with Raft access token");
   }
+  const privateMode = privacyModeEnabled(typeof process === "undefined" ? {} : process.env) || options.privacyMode === true;
+  if (privateMode && !options.baseUrl) {
+    throw new RaftAppError("invalid_options", "Privacy mode requires an explicit self-hosted baseUrl");
+  }
   const base = requireBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL);
+  if (privateMode && isRaftVendorUrl(new URL(base))) {
+    throw new RaftAppError("invalid_options", "Privacy mode requires a non-vendor baseUrl");
+  }
   if (options.fetch === undefined && typeof globalThis.fetch !== "function") {
     throw new RaftAppError("invalid_options", "No global fetch in this runtime; pass options.fetch");
   }

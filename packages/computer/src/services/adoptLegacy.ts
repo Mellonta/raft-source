@@ -38,7 +38,7 @@ import {
   computerDir,
 } from "../paths";
 import { formatServerSlugDisplay, normalizeServerSlug } from "../serverState";
-import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
+import { canonicalizeServerUrl, sessionMatchesServer } from "../serverUrl";
 import { ComputerServiceError } from "./errors";
 import { startedAfterRecord } from "@botiverse/raft-shared";
 import { isProcessAlive, readProcessStartTimeMsBeforeActing } from "../internal/process-primitives";
@@ -327,9 +327,12 @@ async function readUserSessionContext(
     );
   }
 
+  if (!sessionMatchesServer(session.serverUrl, serverUrl)) {
+    throw new ComputerServiceError("INVALID_USER_SESSION", "Sign in to the target server before moving this Computer.");
+  }
   return {
     accessToken: session.accessToken,
-    baseUrl: resolveServerUrl(serverUrl, session.serverUrl, resolveServerUrlEnv()),
+    baseUrl: canonicalizeServerUrl(session.serverUrl),
   };
 }
 

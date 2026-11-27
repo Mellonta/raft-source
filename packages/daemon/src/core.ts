@@ -1,3 +1,4 @@
+import { privacyModeEnabled, assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyTransport";
 export { verifyBundledPiBedrock, verifyBundledPiOAuth } from "./bundledPiOAuth";
 export { verifyBundledKimiSdk } from "./drivers/index";
 export { verifyBundledOarHost } from "./oarLoader";
@@ -3006,6 +3007,7 @@ export class DaemonCore {
   constructor(options: DaemonCoreOptions) {
     this.runtimeAbsentRedetectDelayMs = options.runtimeAbsentRedetectDelayMs ?? RUNTIME_ABSENT_REDETECT_DELAY_MS;
     this.runtimeVersionRecheckIntervalMs = options.runtimeVersionRecheckIntervalMs ?? RUNTIME_VERSION_RECHECK_INTERVAL_MS;
+    assertPrivacyServiceUrl(options.serverUrl);
     this.options = options;
     this.daemonVersion = options.daemonVersion ?? readDaemonVersion();
     this.computerVersion = options.computerVersion?.trim() || null;
@@ -3434,7 +3436,7 @@ export class DaemonCore {
 
   private shouldEnableLocalTrace(): boolean {
     if (this.injectedTracer) return false;
-    if (!this.options.localTrace) return false;
+    if (privacyModeEnabled() || !this.options.localTrace) return false;
     return process.env.SLOCK_DAEMON_LOCAL_TRACE !== "0";
   }
 
@@ -3480,6 +3482,7 @@ export class DaemonCore {
   }
 
   private installTraceBundleUploader(machineDir: string): void {
+    if (privacyModeEnabled()) return;
     if (!this.shouldEnableLocalTrace()) return;
     if (this.traceBundleUploader) return;
 

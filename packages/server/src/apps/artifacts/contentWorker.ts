@@ -10,6 +10,7 @@
 //
 // Secrets and tickets never reach a log: a frame's url carries a ticket and
 // is never logged, nor is a token or the key derived from it.
+import { isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { asArtifactInstanceVersion, asServerId, type ArtifactFramedKind, type ArtifactWebFrame, type ServerId } from "@botiverse/raft-shared";
 import {
@@ -182,6 +183,10 @@ let frameConfigMemo: { raw: string; config: FrameConfig | null } | null = null;
 function contentFrameConfig(env: NodeJS.ProcessEnv = process.env): FrameConfig | null {
   const token = env.ARTIFACTS_CONTENT_WORKER_TOKEN?.trim() ?? "";
   const domain = env.ARTIFACTS_CONTENT_DOMAIN?.trim() ?? "";
+  if (privacyModeEnabled(env)) {
+    const origin = URL.parse(`https://${domain}`);
+    if (origin && isRaftVendorUrl(origin)) return null;
+  }
   const raw = `${token}\n${domain}\n${env.ARTIFACTS_CONTENT_RAFT_TOKENS ?? ""}`;
   if (frameConfigMemo?.raw === raw) return frameConfigMemo.config;
   const problem = !token && !domain

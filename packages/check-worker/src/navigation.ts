@@ -10,6 +10,8 @@
 // - any other top-level navigation, on the same origin too (a script's `location = …`, a
 //   reload, another page of the set): refused and reported. Only the entry page is shot.
 
+import { isRaftVendorUrl } from "@botiverse/raft-shared/src/privacyTransport";
+
 /** What the guard is asked about a request. */
 export interface GuardedRequest {
   url: string;
@@ -26,10 +28,14 @@ export type NavigationDecision = { allow: true } | { allow: false; reason: "off_
 const originOf = (url: string): string | null => (URL.canParse(url) ? new URL(url).origin : null);
 
 /** A guard for one check's tab, opening `ticketUrl`; it remembers whether the entry was asked for. */
-export function createNavigationGuard(ticketUrl: string): (request: GuardedRequest) => NavigationDecision {
+export function createNavigationGuard(ticketUrl: string, privateMode = false): (request: GuardedRequest) => NavigationDecision {
   const entryOrigin = originOf(ticketUrl);
   let entryAsked = false;
   return (request) => {
+    if (privateMode) {
+      const url = URL.parse(request.url);
+      if (url && isRaftVendorUrl(url)) return { allow: false, reason: "off_origin" };
+    }
     if (!request.isNavigation || !request.isMainFrame) return { allow: true };
     const origin = originOf(request.url);
     if (entryOrigin === null || entryOrigin === "null" || origin !== entryOrigin) return { allow: false, reason: "off_origin" };

@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 import api from "../api/client";
 import { runTestNotification } from "../notifications/notificationApi";
 import type { TestNotificationOutcome } from "../notifications/notificationApi";
@@ -70,6 +71,7 @@ export async function recordWebPushPromptEvent(input: {
   detail?: string;
 }) {
   try {
+    if (browserPrivacyMode()) return;
     await api.post("/push/prompt-events", input);
   } catch {
     // Instrumentation must never block the permission flow.

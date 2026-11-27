@@ -434,13 +434,16 @@ test("a cron run with no loopback (ctx.exports.default) leases nothing and says 
 test("settings: an https origin, a token of at least 32 bytes, the browser binding", () => {
   const BROWSER = { fetch: async () => new Response(null) } as unknown as Fetcher;
   const good = { BROWSER, RAFT_API_ORIGIN: "https://api.example.com", ARTIFACTS_CHECK_WORKER_TOKEN: WORKER_TOKEN };
-  assert.deepEqual(configOf(good), { ok: true, origin: "https://api.example.com", token: WORKER_TOKEN, browserPool: false });
+  assert.deepEqual(configOf(good), { ok: true, origin: "https://api.example.com", token: WORKER_TOKEN, privateMode: false, browserPool: false });
   // The pool only on an exact "on": absent, "off", a typo or another case is off (no session shared).
   assert.equal((configOf({ ...good, CHECK_BROWSER_POOL: "on" }) as { browserPool: boolean }).browserPool, true);
   for (const value of [undefined, "off", "", "On", "yes", "true"]) {
     assert.equal((configOf({ ...good, CHECK_BROWSER_POOL: value }) as { browserPool: boolean }).browserPool, false, String(value));
   }
+  assert.equal(configOf({ ...good, RAFT_PRIVACY_MODE: "1" }).ok, true);
   const problems: Array<[Partial<CheckWorkerEnv>, RegExp]> = [
+    [{ ...good, RAFT_PRIVACY_MODE: "1", RAFT_API_ORIGIN: "https://api.raft.build" }, /non-vendor/],
+    [{ ...good, RAFT_PRIVACY_MODE: "invalid" }, /RAFT_PRIVACY_MODE/],
     [{ ...good, RAFT_API_ORIGIN: "" }, /RAFT_API_ORIGIN is not set/],
     [{ ...good, RAFT_API_ORIGIN: "http://api.example.com" }, /not an https origin/],
     [{ ...good, RAFT_API_ORIGIN: "https://api.example.com/" }, /not an https origin/],

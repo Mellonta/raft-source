@@ -3,6 +3,7 @@ import { JointChannelAccessChangedError } from "../lib/channelActorPermissions";
 import { projectRuntimeErrorActivityDetail, projectRuntimeErrorState } from "../services/agentRuntimeErrorVisibility";
 import { DmPeerNotMemberError } from "../services/dmSendPolicy";
 import { DEPRECATED_GRAVATAR_HASH, formatAgentTaskRefTail, isSubConversationType } from "@botiverse/raft-shared";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { respondToTaskWriteError } from "../lib/taskWriteErrorResponse";
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
 import { traceIdentityHash } from "../tracing/traceIdentity";
@@ -1963,6 +1964,10 @@ internalRouter.post("/agent/:id/integrations/app/prepare", async (req, res) => {
 // The server signs authorization metadata only; upload/data bytes must go to the
 // requested third-party worker directly from the daemon.
 internalRouter.post("/machine/scope-attestation", async (req, res) => {
+  if (privacyModeEnabled()) {
+    res.status(403).json({ error: "Diagnostic uploads are disabled in privacy mode" });
+    return;
+  }
   try {
     if (!req.machineId || !req.serverId) {
       refuse(res, 401, MACHINE_AUTH_REQUIRED_REFUSAL);

@@ -1,5 +1,6 @@
 import { parseSlackAttachmentFallbackDeployment, SLACK_ATTACHMENT_FALLBACK_ENV_KEYS } from "./slackAttachmentFallbackDeployment";
 import { randomUUID } from "node:crypto";
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyTransport";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS, type Tracer } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
 
@@ -215,6 +216,7 @@ function httpsUrl(value: string, name: string): string {
   if (url.protocol !== "https:" || url.username || url.password) {
     throw new Error(`Slack Bridge production runtime ${name} must be credential-free HTTPS`);
   }
+  assertPrivacyServiceUrl(url);
   return url.toString();
 }
 
@@ -237,6 +239,7 @@ function managedAppOrigin(
       `Slack Bridge production runtime app URL must be credential-free ${protocol}`,
     );
   }
+  assertPrivacyServiceUrl(url);
   return url.origin;
 }
 

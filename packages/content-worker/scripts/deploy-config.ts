@@ -27,13 +27,14 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { assertPrivacyServiceUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 
 import { extraAppOriginsOf, framedByOriginsOf } from "../src/appOrigins";
 
 /** The Worker's secrets (RaftContentEnv), set on it by the deployment, never by this script. */
 export const REQUIRED_SECRETS = ["PORTHOLE_SECRET", "RAFT_API_TOKEN", "RAFT_TOKENS", "R2_READ_ACCESS_KEY_ID", "R2_READ_SECRET_ACCESS_KEY"] as const;
 /** The Worker's vars, sorted. */
-const VARS = ["APP_ORIGIN", "CONTENT_DOMAIN", "EMBEDS", "EMBED_DOMAIN", "EXTRA_APP_ORIGINS", "FRAMED_BY_ORIGINS", "R2_BUCKET", "R2_ENDPOINT", "RAFT_API_URL"] as const;
+const VARS = ["APP_ORIGIN", "CONTENT_DOMAIN", "EMBEDS", "EMBED_DOMAIN", "EXTRA_APP_ORIGINS", "FRAMED_BY_ORIGINS", "R2_BUCKET", "R2_ENDPOINT", "RAFT_API_URL", "RAFT_PRIVACY_MODE"] as const;
 const D1_BINDING = "TICKETS";
 /** An account's R2 S3 endpoint, an origin: `https://<account id>[.<jurisdiction>].r2.cloudflarestorage.com`. */
 const R2_ENDPOINT = /^https:\/\/[0-9a-f]{32}(?:\.[a-z]+)?\.r2\.cloudflarestorage\.com$/;
@@ -148,6 +149,7 @@ export function renderDeployConfig(baseText: string, envName: string, env: NodeJ
   const contentDomain = required(env, "CONTENT_WORKER_CONTENT_DOMAIN", HOST, "a lowercase host name (no scheme, port or path)");
   const appOrigin = httpsUrl(env, "CONTENT_WORKER_APP_ORIGIN", true);
   const raftApiUrl = httpsUrl(env, "CONTENT_WORKER_RAFT_API_URL", false);
+  assertPrivacyServiceUrl(raftApiUrl, env);
   // Optional; checked as the Worker checks it (a bad entry would make the content domain a 503).
   const extraAppOrigins = extraAppOriginsOf(env.CONTENT_WORKER_EXTRA_APP_ORIGINS);
   for (const origin of extraAppOrigins) {
@@ -183,6 +185,7 @@ export function renderDeployConfig(baseText: string, envName: string, env: NodeJ
       R2_BUCKET: bucket,
       R2_ENDPOINT: endpoint,
       RAFT_API_URL: raftApiUrl,
+      RAFT_PRIVACY_MODE: privacyModeEnabled(env) ? "1" : "0",
     },
   };
   return { ...base, env: { [envName]: section } };

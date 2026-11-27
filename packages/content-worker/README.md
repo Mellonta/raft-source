@@ -45,6 +45,8 @@ Settings that can't be served (a missing domain, origin or API URL, a bad `EXTRA
 
 Secrets are set on the Worker by your deployment, never committed. Raft's own deployment keeps them in a secret store and syncs them to the Worker with a workflow.
 
+For a self-hosted deployment, set `RAFT_PRIVACY_MODE=1` when rendering the deployment config, or set the Worker binding directly. It rejects vendor API and storage URLs before sending credentials.
+
 To deploy without editing `wrangler.jsonc`, `scripts/deploy-config.ts render <env> <output>` writes it with one `env.<env>` section filled in from `CONTENT_WORKER_NAME`, `CONTENT_WORKER_R2_BUCKET`, `CONTENT_WORKER_R2_ENDPOINT` (its `R2_BUCKET` and `R2_ENDPOINT` vars), `CONTENT_WORKER_D1_DATABASE_NAME`, `CONTENT_WORKER_D1_DATABASE_ID`, `CONTENT_WORKER_CONTENT_DOMAIN`, `CONTENT_WORKER_APP_ORIGIN`, `CONTENT_WORKER_EXTRA_APP_ORIGINS` (optional), `CONTENT_WORKER_FRAMED_BY_ORIGINS` (optional), `CONTENT_WORKER_EMBEDS` and `CONTENT_WORKER_EMBED_DOMAIN` (optional, together) and `CONTENT_WORKER_RAFT_API_URL`. Write it beside `wrangler.jsonc` (`wrangler.*.generated.json` is ignored) and pass it to every wrangler command with `--config <output> --env <env>`. The script's other modes check a deploy afterwards: the secret names (all five, `R2_READ_*` included), and the deployed version's bindings (no R2 binding).
 
 ### Reading R2: a read-only token, no binding

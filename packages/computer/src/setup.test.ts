@@ -9,6 +9,9 @@ import { dirname, join } from "node:path";
 
 import { BasicTracer, MemoryTraceSink, type CompletedTraceSpan } from "@botiverse/raft-shared";
 
+import { ensureUsableUserSession, readUserSessionAuth, refreshUserSession } from "./lib/userSession";
+import { attach } from "./services/attach";
+import { adoptLegacy } from "./services/adoptLegacy";
 import { CliExit, inferNextCommands } from "./output";
 import { ComputerError } from "./lib/errors";
 import { markTerminalUnlinked } from "./health";
@@ -519,6 +522,47 @@ test("setup (legacy-daemon branch, no terminal): a saved session the server no l
         && /in a terminal to approve the move there/.test(err.message),
     );
     assert.deepEqual(calls, ["detect", "servers"]);
+  });
+});
+
+test("a saved session with a different or unknown issuer cannot send either token to a target server", async () => {
+  await withHome(async (home) => {
+    let requests = 0;
+    const server = createServer((_req, res) => { requests++; res.writeHead(401).end(); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      const serverUrl = `http://127.0.0.1:${address.port}`;
+      for (const writeSavedSession of [writeSession, writeExpiredSession]) {
+        for (const issuer of [DEFAULT_SLOCK_SERVER_URL, undefined]) {
+          await writeSavedSession(home);
+          const file = userSessionPath(home);
+          const saved = JSON.parse(await readFile(file, "utf8"));
+          const before = JSON.stringify({ ...saved, serverUrl: issuer });
+          await writeFile(file, before);
+          assert.deepEqual(await readUserSessionAuth(home, serverUrl), { accessToken: "" });
+          assert.equal((await ensureUsableUserSession(home, serverUrl)).status, "not_logged_in");
+          assert.equal(await refreshUserSession(home, serverUrl), false);
+          if (!issuer) {
+            assert.deepEqual(await readUserSessionAuth(home), { accessToken: "" });
+            assert.equal(await refreshUserSession(home), false);
+          }
+          await assert.rejects(attach({ serverSlug: "alpha", slockHome: home, serverUrl }), { code: "INVALID_USER_SESSION" });
+          await assert.rejects(adoptLegacy({ serverSlug: "alpha", serverUrl, rawKey: "fake", mode: "legacy_key_argv", redactedPrefix: "fake" }), { code: "INVALID_USER_SESSION" });
+          await assert.rejects(
+            setupCore(home, { serverSlug: "alpha", serverUrl, yes: true }, {
+              isTty: false, detectLegacyMigration: detectWithLegacyEvidence([]),
+            }, () => {}),
+            (err: unknown) => err instanceof ComputerError && err.code === "NON_INTERACTIVE_SETUP_REQUIRES_FLAGS",
+          );
+          assert.equal(await readFile(file, "utf8"), before);
+          assert.equal(requests, 0);
+        }
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

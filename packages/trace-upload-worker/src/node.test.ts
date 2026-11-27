@@ -4,6 +4,23 @@ import { spawn } from "node:child_process";
 
 const SECRET = "scope-secret-for-node-tests";
 
+test("private trace worker starts without storage credentials and rejects old upload links", async () => {
+  const port = await getFreePort();
+  const child = spawn(process.execPath, ["--import", "@oxc-node/core/register", "src/node.ts"], {
+    env: { PATH: process.env.PATH, RAFT_PRIVACY_MODE: "true", PORT: String(port) },
+    stdio: "ignore",
+  });
+  try {
+    await waitForHealthz(port);
+    for (const [method, path] of [
+      ["POST", "/api/web-traces"], ["POST", "/api/reports"], ["PUT", "/api/trace-bundles/old/object"],
+    ]) {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, { method, body: "fixture" });
+      assert.equal(res.status, 403);
+    }
+  } finally { child.kill(); }
+});
+
 test("Node trace upload service resolves https from comma-list x-forwarded-proto", async () => {
   const port = await getFreePort();
   const child = spawn(

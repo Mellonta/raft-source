@@ -417,7 +417,7 @@ async function legacyMigrationForDoctor(
   deps: DoctorDeps,
 ): Promise<MigrationDetection | null> {
   if (!attachment.serverSlug) return null;
-  const session = await readUserSessionAuth(slockHome).catch(() => null);
+  const session = await readUserSessionAuth(slockHome, attachment.serverUrl).catch(() => null);
   if (!session?.accessToken) return null;
   const detect = deps.detectMigration ?? detectLegacyMigration;
   return await detect(
@@ -459,7 +459,7 @@ async function regretSwitchDetail(
   if (deps.listServerMachines) {
     machinesResult = await deps.listServerMachines(attachment);
   } else {
-    const session = await readUserSessionAuth(slockHome).catch(() => null);
+    const session = await readUserSessionAuth(slockHome, attachment.serverUrl).catch(() => null);
     if (!session?.accessToken) return null;
     machinesResult = await new ServerMachinesClient(attachment.serverUrl, session.accessToken).list(attachment.serverId);
   }

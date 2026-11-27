@@ -193,8 +193,7 @@ export interface LocalLifecycleIntentDependencies {
 
 const defaultDependencies: LocalLifecycleIntentDependencies = {
   readAttachment: readServerAttachment,
-  ensureSession: (slockHome, serverUrl) =>
-    ensureUsableUserSession(slockHome, serverUrl, { requireServerOrigin: true }),
+  ensureSession: ensureUsableUserSession,
   createIntent: (serverUrl, accessToken, input) =>
     new ComputerLifecycleClient(serverUrl, accessToken).create(input),
   createMachineIntent: (serverUrl, computerApiKey, input) =>

@@ -77,7 +77,7 @@ export function createHandler(deps: HandlerDeps) {
       return json(400, { error: { code: "invalid-lease" } });
     }
     const outcome = await runLeasedCheck(
-      { api: { origin: config.origin, token: config.token, fetch: raftFetch }, acquireBrowser: (note) => deps.acquireBrowser(env.BROWSER, { enabled: config.browserPool, now, note }), now, sleep, log, timing: deps.timing },
+      { privateMode: config.privateMode, api: { origin: config.origin, token: config.token, fetch: raftFetch }, acquireBrowser: (note) => deps.acquireBrowser(env.BROWSER, { enabled: config.browserPool, now, note }), now, sleep, log, timing: deps.timing },
       lease,
     );
     return json(200, { outcome });

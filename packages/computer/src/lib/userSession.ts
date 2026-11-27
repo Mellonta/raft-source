@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 
 import { CURRENT_SCHEMA_VERSION, userSessionPath } from "../paths";
 import { computerFetch } from "../proxy";
-import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
+import { canonicalizeServerUrl, normalizeServerUrl, resolveServerUrl, resolveServerUrlEnv, sessionMatchesServer } from "../serverUrl";
 
 const USER_SESSION_EXPIRY_LEEWAY_MS = 30_000;
 const refreshUserSessionInflight = new Map<string, Promise<boolean>>();
@@ -41,13 +41,21 @@ export type UsableUserSession =
       serverUrl?: string;
     };
 
+export async function resolveDeviceApprovalServerUrl(slockHome: string, serverUrl?: string): Promise<string> {
+  if (serverUrl?.trim()) return resolveServerUrl(serverUrl);
+  const session = await readUserSession(slockHome);
+  return resolveServerUrl(typeof session?.serverUrl === "string" ? session.serverUrl : undefined, resolveServerUrlEnv());
+}
+
 export async function readUserSessionAuth(
   slockHome: string,
+  serverUrl?: string,
 ): Promise<{ accessToken: string; serverUrl?: string }> {
   const session = await readUserSession(slockHome);
+  if (!isUsableSessionShape(session) || !sessionMatchesServer(session.serverUrl, serverUrl)) return { accessToken: "" };
   return {
-    accessToken: typeof session?.accessToken === "string" ? session.accessToken : "",
-    ...(typeof session?.serverUrl === "string" ? { serverUrl: canonicalizeServerUrl(session.serverUrl) } : {}),
+    accessToken: session.accessToken,
+    serverUrl: canonicalizeServerUrl(session.serverUrl),
   };
 }
 
@@ -64,15 +72,14 @@ export async function readUserSessionIdentity(slockHome: string): Promise<UserSe
   };
 }
 
-export async function hasUnexpiredUserSessionShape(slockHome: string): Promise<boolean> {
+export async function hasUnexpiredUserSessionShape(slockHome: string, serverUrl?: string): Promise<boolean> {
   const session = await readUserSession(slockHome);
-  return isUsableSessionShape(session) && !isJwtExpired(session.accessToken);
+  return isUsableSessionShape(session) && sessionMatchesServer(session.serverUrl, serverUrl) && !isJwtExpired(session.accessToken);
 }
 
 export async function ensureUsableUserSession(
   slockHome: string,
   serverUrl?: string,
-  options: { requireServerOrigin?: boolean } = {},
 ): Promise<UsableUserSession> {
   const session = await readUserSession(slockHome);
   if (!session) return { status: "not_logged_in", reason: "missing" };
@@ -84,28 +91,19 @@ export async function ensureUsableUserSession(
     };
   }
 
-  const requestedServerUrl = typeof serverUrl === "string" ? canonicalizeServerUrl(serverUrl) : null;
-  const sessionServerUrl = typeof session.serverUrl === "string" ? canonicalizeServerUrl(session.serverUrl) : null;
-  const originMismatch = options.requireServerOrigin === true
-    && requestedServerUrl !== null
-    && requestedServerUrl !== sessionServerUrl;
-  if (originMismatch) {
-    return {
-      status: "not_logged_in",
-      reason: "server_origin_mismatch",
-      ...(sessionServerUrl ? { serverUrl: sessionServerUrl } : {}),
-    };
+  if (!sessionMatchesServer(session.serverUrl, serverUrl)) {
+    return { status: "not_logged_in", reason: "server_origin_mismatch" };
   }
   if (!isJwtExpired(session.accessToken)) {
     return {
       status: "usable",
       accessToken: session.accessToken,
-      ...(typeof session.serverUrl === "string" ? { serverUrl: canonicalizeServerUrl(session.serverUrl) } : {}),
+      serverUrl: canonicalizeServerUrl(session.serverUrl),
       refreshed: false,
     };
   }
 
-  const refreshed = await refreshUserSession(slockHome, serverUrl);
+  const refreshed = await refreshUserSession(slockHome, session.serverUrl);
   if (!refreshed) {
     return {
       status: "not_logged_in",
@@ -124,10 +122,13 @@ export async function ensureUsableUserSession(
       ...(typeof next?.serverUrl === "string" ? { serverUrl: canonicalizeServerUrl(next.serverUrl) } : {}),
     };
   }
+  if (!sessionMatchesServer(next.serverUrl, session.serverUrl)) {
+    return { status: "not_logged_in", reason: "server_origin_mismatch" };
+  }
   return {
     status: "usable",
     accessToken: next.accessToken,
-    ...(typeof next.serverUrl === "string" ? { serverUrl: canonicalizeServerUrl(next.serverUrl) } : {}),
+    serverUrl: canonicalizeServerUrl(next.serverUrl),
     refreshed: true,
   };
 }
@@ -139,7 +140,8 @@ export async function refreshUserSession(slockHome: string, serverUrl?: string):
     return false;
   }
 
-  const baseUrl = resolveServerUrl(serverUrl, session.serverUrl, resolveServerUrlEnv());
+  if (!sessionMatchesServer(session.serverUrl, serverUrl)) return false;
+  const baseUrl = canonicalizeServerUrl(session.serverUrl);
   const existing = refreshUserSessionInflight.get(file);
   if (existing) return existing;
   const refresh = refreshUserSessionOnce(file, session, baseUrl);
@@ -158,6 +160,7 @@ async function refreshUserSessionOnce(file: string, session: UserSession, baseUr
   try {
     const res = await computerFetch(new URL("/api/auth/refresh", baseUrl).toString(), {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refreshToken: session.refreshToken }),
     });

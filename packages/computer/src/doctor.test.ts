@@ -901,9 +901,9 @@ test("doctor: healthy connected attachment without legacy machineId does not bec
 
 test("doctor: zero-match legacy evidence surfaces setup-blocking identity check", async () => {
   await withHome(async (home) => {
-    await writeUserSessionForServer(home, "tok", "https://api.example.test");
     const ctx = await startPreflightServer(200, { ok: true });
     try {
+      await writeUserSessionForServer(home, "tok", ctx.baseUrl);
       await writeAttach(home, SERVER_A, SECRET_KEY, {
         serverSlug: "botiverse",
         serverUrl: ctx.baseUrl,

@@ -65,3 +65,12 @@ test("a ticket URL that isn't a URL refuses every top-level navigation", () => {
   const guard = createNavigationGuard("not a url");
   assert.deepEqual(guard(nav("not a url")), { allow: false, reason: "off_origin" });
 });
+
+test("private checks block vendor tickets, subresources and subframes", () => {
+  const vendor = "https://w-fixture.raftusercontent.com/_raft/open";
+  assert.equal(createNavigationGuard(vendor, true)(nav(vendor)).allow, false);
+  const guard = createNavigationGuard(TICKET_URL, true);
+  assert.equal(guard(nav(TICKET_URL)).allow, true);
+  assert.equal(guard(nav(vendor, { isMainFrame: false })).allow, false);
+  assert.equal(guard(nav(vendor, { isNavigation: false })).allow, false);
+});

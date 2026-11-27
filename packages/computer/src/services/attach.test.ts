@@ -28,7 +28,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
-async function withHome<T>(fn: (home: string) => Promise<T>, opts: { writeSession?: boolean; sessionOverride?: unknown } = {}): Promise<T> {
+async function withHome<T>(serverUrl: string, fn: (home: string) => Promise<T>, opts: { writeSession?: boolean; sessionOverride?: unknown } = {}): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "raft-computer-attach-svc-"));
   const old = process.env.SLOCK_HOME;
   process.env.SLOCK_HOME = home;
@@ -45,7 +45,7 @@ async function withHome<T>(fn: (home: string) => Promise<T>, opts: { writeSessio
               kind: "user-session",
               userId: "user-1",
               accessToken: "user-token",
-              serverUrl: "",
+              serverUrl,
             }),
       );
     }
@@ -160,8 +160,8 @@ async function stop(server: Server): Promise<void> {
 
 // --- Gate 1: happy path emits attaching + preflight + attached, persists attachment ---
 test("attach service: happy path emits attaching + preflight + attached, writes runner.state.json (0600)", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({});
+  const ctx = await startAttachServer({});
+  await withHome(ctx.baseUrl, async (home) => {
     const events: ComputerApiEvent[] = [];
     try {
       const result = await attach(
@@ -210,9 +210,9 @@ test("attach service: happy path emits attaching + preflight + attached, writes 
 });
 
 test("attach service: existing local attachment is idempotent and does not call server attach by name", async () => {
-  await withHome(
+  const ctx = await startAttachServer({});
+  await withHome(ctx.baseUrl,
     async (home) => {
-      const ctx = await startAttachServer({});
       const events: ComputerApiEvent[] = [];
       try {
         await writeLocalAttachment(home, ctx.baseUrl);
@@ -242,10 +242,10 @@ test("attach service: existing local attachment is idempotent and does not call 
 });
 
 test("attach service: existing local attachment with revoked key fails closed instead of fresh-attaching", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      preflight: { status: 401, body: { code: "computer_key_revoked" } },
-    });
+  const ctx = await startAttachServer({
+    preflight: { status: 401, body: { code: "computer_key_revoked" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await writeLocalAttachment(home, ctx.baseUrl);
       await assert.rejects(
@@ -269,7 +269,7 @@ test("attach service: existing local attachment with revoked key fails closed in
 });
 
 test("attach service: existing local attachment with unreachable preflight asks user to retry", async () => {
-  await withHome(async (home) => {
+  await withHome("http://127.0.0.1:1", async (home) => {
     await writeLocalAttachment(home, "http://127.0.0.1:1");
     await assert.rejects(
       () => attach({ serverSlug: "/alpha", serverUrl: "http://127.0.0.1:1", name: "New Name", slockHome: home }),
@@ -291,7 +291,7 @@ test("attach service: existing local attachment with unreachable preflight asks 
 });
 
 test("attach service: same slug with explicit different serverUrl fails closed instead of name-binding", async () => {
-  await withHome(async (home) => {
+  await withHome("http://127.0.0.1:1", async (home) => {
     await writeLocalAttachment(home, "https://api.one.example.test");
     await assert.rejects(
       () => attach({ serverSlug: "/alpha", serverUrl: "https://api.two.example.test", name: "New Name", slockHome: home }),
@@ -307,14 +307,14 @@ test("attach service: same slug with explicit different serverUrl fails closed i
 });
 
 test("attach service: expired user session silently refreshes before attach", async () => {
-  await withHome(
+  const ctx = await startAttachServer({
+    refresh: {
+      status: 200,
+      body: { accessToken: "fresh-user-token", refreshToken: "fresh-refresh-token" },
+    },
+  });
+  await withHome(ctx.baseUrl,
     async (home) => {
-      const ctx = await startAttachServer({
-        refresh: {
-          status: 200,
-          body: { accessToken: "fresh-user-token", refreshToken: "fresh-refresh-token" },
-        },
-      });
       try {
         const result = await attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home });
         assert.equal(result.serverId, SERVER_ID);
@@ -336,7 +336,7 @@ test("attach service: expired user session silently refreshes before attach", as
         userId: "user-1",
         accessToken: jwtExp(-60),
         refreshToken: "old-refresh-token",
-        serverUrl: "",
+        serverUrl: ctx.baseUrl,
         name: "Cindy",
       },
     },
@@ -345,7 +345,7 @@ test("attach service: expired user session silently refreshes before attach", as
 
 // --- Gate 2: NO_USER_SESSION (file missing) ---
 test("attach service: missing user session throws NO_USER_SESSION", async () => {
-  await withHome(
+  await withHome("http://127.0.0.1:1",
     async (home) => {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: "http://127.0.0.1:1", slockHome: home }),
@@ -363,7 +363,7 @@ test("attach service: missing user session throws NO_USER_SESSION", async () => 
 
 // --- Gate 3: INVALID_USER_SESSION (file present but malformed) ---
 test("attach service: invalid user session shape throws INVALID_USER_SESSION", async () => {
-  await withHome(
+  await withHome("http://127.0.0.1:1",
     async (home) => {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: "http://127.0.0.1:1", slockHome: home }),
@@ -381,7 +381,7 @@ test("attach service: invalid user session shape throws INVALID_USER_SESSION", a
 
 // --- Gate 4: ATTACH_NOT_AUTHORIZED for empty slug AND for server 403 ---
 test("attach service: empty server slug throws ATTACH_NOT_AUTHORIZED", async () => {
-  await withHome(async (home) => {
+  await withHome("http://127.0.0.1:1", async (home) => {
     await assert.rejects(
       () => attach({ serverSlug: "", serverUrl: "http://127.0.0.1:1", slockHome: home }),
       (err: unknown) => {
@@ -395,11 +395,11 @@ test("attach service: empty server slug throws ATTACH_NOT_AUTHORIZED", async () 
 });
 
 test("attach service: 403 from server throws ATTACH_NOT_AUTHORIZED", async () => {
-  await withHome(
+  const ctx = await startAttachServer({
+    attach: { status: 403, body: { code: "not_authorized" } },
+  });
+  await withHome(ctx.baseUrl,
     async (home) => {
-      const ctx = await startAttachServer({
-        attach: { status: 403, body: { code: "not_authorized" } },
-      });
       try {
         await assert.rejects(
           () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -423,7 +423,7 @@ test("attach service: 403 from server throws ATTACH_NOT_AUTHORIZED", async () =>
         kind: "user-session",
         userId: "user-1",
         accessToken: "user-token",
-        serverUrl: "",
+        serverUrl: ctx.baseUrl,
         email: "cindy@example.io",
         name: "cindy",
         displayName: "Cindy",
@@ -437,10 +437,10 @@ test("attach service: 403 from server throws ATTACH_NOT_AUTHORIZED", async () =>
 // distinct from `not_authorized` so the caller renders "ask an admin", not a
 // misleading "you're not a member".
 test("attach service: 403 requires_admin throws ATTACH_REQUIRES_ADMIN, not ATTACH_NOT_AUTHORIZED", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      attach: { status: 403, body: { code: "requires_admin" } },
-    });
+  const ctx = await startAttachServer({
+    attach: { status: 403, body: { code: "requires_admin" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -458,10 +458,10 @@ test("attach service: 403 requires_admin throws ATTACH_REQUIRES_ADMIN, not ATTAC
 
 // --- Gate 5: ATTACH_DISABLED (404 with no code / disabled code) ---
 test("attach service: 404 plain throws ATTACH_DISABLED", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      attach: { status: 404, body: {} },
-    });
+  const ctx = await startAttachServer({
+    attach: { status: 404, body: {} },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -479,10 +479,10 @@ test("attach service: 404 plain throws ATTACH_DISABLED", async () => {
 
 // --- Gate 6: ATTACH_SERVER_NOT_FOUND (404 with not_authorized / server_not_found code) ---
 test("attach service: 404 with server_not_found code throws ATTACH_SERVER_NOT_FOUND", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      attach: { status: 404, body: { code: "server_not_found" } },
-    });
+  const ctx = await startAttachServer({
+    attach: { status: 404, body: { code: "server_not_found" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/missing-server", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -501,10 +501,10 @@ test("attach service: 404 with server_not_found code throws ATTACH_SERVER_NOT_FO
 
 // --- Gate 7: USER_SESSION_EXPIRED (401 session_invalid) ---
 test("attach service: 401 session_invalid throws USER_SESSION_EXPIRED", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      attach: { status: 401, body: {} },
-    });
+  const ctx = await startAttachServer({
+    attach: { status: 401, body: {} },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -526,8 +526,8 @@ test("attach service: 401 session_invalid throws USER_SESSION_EXPIRED", async ()
 
 // --- Gate 8: ATTACH_REQUEST_FAILED (network drop) ---
 test("attach service: connection drop throws ATTACH_REQUEST_FAILED", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({ attachConn: "destroy" });
+  const ctx = await startAttachServer({ attachConn: "destroy" });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -546,10 +546,10 @@ test("attach service: connection drop throws ATTACH_REQUEST_FAILED", async () =>
 
 // --- Gate 9: COMPUTER_NAME_COLLISION (server returns the explicit code) ---
 test("attach service: COMPUTER_NAME_COLLISION error code is preserved byte-identical", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      attach: { status: 409, body: { code: "COMPUTER_NAME_COLLISION" } },
-    });
+  const ctx = await startAttachServer({
+    attach: { status: 409, body: { code: "COMPUTER_NAME_COLLISION" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, name: "Bench Rig", slockHome: home }),
@@ -571,10 +571,10 @@ test("attach service: COMPUTER_NAME_COLLISION error code is preserved byte-ident
 
 // --- Gate 10: ATTACH_FAILED (generic unrecognized server error) ---
 test("attach service: generic server error throws ATTACH_FAILED carrying the code", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      attach: { status: 500, body: { code: "internal_attach_error" } },
-    });
+  const ctx = await startAttachServer({
+    attach: { status: 500, body: { code: "internal_attach_error" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -593,10 +593,10 @@ test("attach service: generic server error throws ATTACH_FAILED carrying the cod
 
 // --- Gate 11: PREFLIGHT_FAILED leaves zero local-state residue (fail-closed) ---
 test("attach service: preflight failure throws PREFLIGHT_FAILED + ZERO local-state residue", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAttachServer({
-      preflight: { status: 200, body: { ok: false, code: "schema_mismatch" } },
-    });
+  const ctx = await startAttachServer({
+    preflight: { status: 200, body: { ok: false, code: "schema_mismatch" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () => attach({ serverSlug: "/alpha", serverUrl: ctx.baseUrl, slockHome: home }),
@@ -620,7 +620,7 @@ test("attach service: preflight failure throws PREFLIGHT_FAILED + ZERO local-sta
 
 // --- Gate 12: AbortSignal cancels before the network call ---
 test("attach service: pre-aborted AbortSignal throws AbortError, not ComputerServiceError", async () => {
-  await withHome(async (home) => {
+  await withHome("http://127.0.0.1:1", async (home) => {
     const ac = new AbortController();
     ac.abort();
     await assert.rejects(

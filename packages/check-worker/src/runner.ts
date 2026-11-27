@@ -72,6 +72,7 @@ export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
 export type DispatchAnswer = { kind: "ran"; outcome: CheckOutcome } | { kind: "failed"; status: number };
 
 export interface LeasedCheckDeps {
+  privateMode?: boolean;
   api: RaftApi;
   /** A session for the check (pool.ts), `note` for the pool's own lines. Throws when none can be had. */
   acquireBrowser: (note: (event: string, fields: LogFields) => void) => Promise<CheckBrowser>;
@@ -222,7 +223,7 @@ export async function runLeasedCheck(deps: LeasedCheckDeps, lease: ArtifactCheck
   try {
     let run: Awaited<ReturnType<typeof runCheck>>;
     try {
-      run = await runCheck(browser, lease, { now: deps.now, sleep: deps.sleep, log: deps.log, timing: deps.timing, browserMs });
+      run = await runCheck(browser, lease, { privateMode: deps.privateMode, now: deps.now, sleep: deps.sleep, log: deps.log, timing: deps.timing, browserMs });
     } catch (error) {
       // Not expected (runCheck answers outcomes); kept to its class, nothing posted.
       deps.log("error", "check.failed", { ...ids, errorClass: errorClassOf(error, "check_failed") });

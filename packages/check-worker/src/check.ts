@@ -88,6 +88,7 @@ export const CHECK_TIMING: CheckTiming = {
 export const PHONE_USER_AGENT = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
 
 export interface CheckDeps {
+  privateMode?: boolean;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   log: Logger;
@@ -158,7 +159,7 @@ export async function runCheck(browser: CheckBrowser, lease: ArtifactCheckLease,
   const [first, ...others] = lease.viewports;
   if (first === undefined) return { kind: "not_started", errorClass: "no_viewport" };
   const findings = createFindings(lease.url);
-  const guard = createNavigationGuard(lease.url);
+  const guard = createNavigationGuard(lease.url, deps.privateMode);
 
   let context: CheckContext;
   try {

@@ -32,7 +32,7 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
-async function withHome<T>(
+async function withHome<T>(serverUrl: string,
   fn: (home: string) => Promise<T>,
   opts: { writeSession?: boolean; sessionOverride?: unknown } = {},
 ): Promise<T> {
@@ -52,7 +52,7 @@ async function withHome<T>(
               kind: "user-session",
               userId: "user-1",
               accessToken: "user-token",
-              serverUrl: "",
+              serverUrl,
             }),
       );
     }
@@ -219,8 +219,8 @@ const LEGACY_PREFIX = LEGACY_KEY.slice(0, 8);
 // success line; service event/result are SECRET-FREE (no raw fresh key,
 // no raw legacy key). ---
 test("adoptLegacy service: happy path emits adopting + preflight + adopted, writes runner.state.json (0600), appends adoption.log", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({});
+  const ctx = await startAdoptServer({});
+  await withHome(ctx.baseUrl, async (home) => {
     const events: AdoptLegacyEvent[] = [];
     try {
       const result = await adoptLegacy(
@@ -315,8 +315,8 @@ test("adoptLegacy service: happy path emits adopting + preflight + adopted, writ
 });
 
 test("adoptLegacy service: live legacy daemon stops before runner.state.json is written", { skip: process.platform === "win32" }, async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({});
+  const ctx = await startAdoptServer({});
+  await withHome(ctx.baseUrl, async (home) => {
     const markerPath = join(home, "legacy-stop-signaled.txt");
     const child = await spawnLegacyDaemonProbe(markerPath);
     try {
@@ -363,8 +363,8 @@ test("adoptLegacy service: a live lock pid that started after the lock was writt
     [Date.parse(lockStartedAt) - 2_000, "stopped"],
     [undefined, "stopped"],
   ] as const) {
-    await withHome(async (home) => {
-      const ctx = await startAdoptServer({});
+    const ctx = await startAdoptServer({});
+    await withHome(ctx.baseUrl, async (home) => {
       const markerPath = join(home, "legacy-stop-signaled.txt");
       const child = await spawnLegacyDaemonProbe(markerPath);
       try {
@@ -390,8 +390,8 @@ test("adoptLegacy service: a live lock pid that started after the lock was writt
 });
 
 test("adoptLegacy service: fingerprint selector network failure throws ADOPT_NETWORK_FAILED with serverUrl and retry guidance", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({ adoptConn: "destroy" });
+  const ctx = await startAdoptServer({ adoptConn: "destroy" });
+  await withHome(ctx.baseUrl, async (home) => {
     const ownerPath = await seedLegacyOwnerFile(home, LEGACY_KEY, JSON.stringify({ pid: 999_999_999 }));
     try {
       await assert.rejects(
@@ -424,8 +424,8 @@ test("adoptLegacy service: fingerprint selector network failure throws ADOPT_NET
 });
 
 test("adoptLegacy service: daemonId selector network failure throws ADOPT_NETWORK_FAILED with serverUrl and retry guidance", async () => {
-  await withHome(async () => {
-    const ctx = await startAdoptServer({ adoptConn: "destroy" });
+  const ctx = await startAdoptServer({ adoptConn: "destroy" });
+  await withHome(ctx.baseUrl, async () => {
     try {
       await assert.rejects(
         () =>
@@ -451,14 +451,14 @@ test("adoptLegacy service: daemonId selector network failure throws ADOPT_NETWOR
 
 // --- PR-A2: auth_required → refresh session once → retry (the 0.71 case) ---
 test("adoptLegacy service: fingerprint adoption retries once after session refresh on auth_required", async () => {
-  await withHome(
+  const ctx = await startAdoptServer({
+    adoptQueue: [
+      { status: 401, body: { code: "auth_required", error: "token expired" } },
+    ],
+    refresh: { status: 200, body: { accessToken: "user-token-2", refreshToken: "rt-2" } },
+  });
+  await withHome(ctx.baseUrl,
     async (home) => {
-      const ctx = await startAdoptServer({
-        adoptQueue: [
-          { status: 401, body: { code: "auth_required", error: "token expired" } },
-        ],
-        refresh: { status: 200, body: { accessToken: "user-token-2", refreshToken: "rt-2" } },
-      });
       const ownerPath = await seedLegacyOwnerFile(home, LEGACY_KEY, JSON.stringify({ pid: 999_999_999 }));
       try {
         const result = await adoptLegacyByFingerprint({
@@ -483,22 +483,22 @@ test("adoptLegacy service: fingerprint adoption retries once after session refre
         userId: "user-1",
         accessToken: "user-token-stale",
         refreshToken: "rt-1",
-        serverUrl: "",
+        serverUrl: ctx.baseUrl,
       },
     },
   );
 });
 
 test("adoptLegacy service: auth_required with failing refresh still surfaces ADOPT_AUTH_REQUIRED", async () => {
-  await withHome(
+  const ctx = await startAdoptServer({
+    adoptQueue: [
+      { status: 401, body: { code: "auth_required", error: "token expired" } },
+      { status: 401, body: { code: "auth_required", error: "token expired" } },
+    ],
+    refresh: { status: 401, body: { error: "refresh token revoked" } },
+  });
+  await withHome(ctx.baseUrl,
     async (home) => {
-      const ctx = await startAdoptServer({
-        adoptQueue: [
-          { status: 401, body: { code: "auth_required", error: "token expired" } },
-          { status: 401, body: { code: "auth_required", error: "token expired" } },
-        ],
-        refresh: { status: 401, body: { error: "refresh token revoked" } },
-      });
       const ownerPath = await seedLegacyOwnerFile(home, LEGACY_KEY, JSON.stringify({ pid: 999_999_999 }));
       try {
         await assert.rejects(
@@ -528,7 +528,7 @@ test("adoptLegacy service: auth_required with failing refresh still surfaces ADO
         userId: "user-1",
         accessToken: "user-token-stale",
         refreshToken: "rt-1",
-        serverUrl: "",
+        serverUrl: ctx.baseUrl,
       },
     },
   );
@@ -536,7 +536,7 @@ test("adoptLegacy service: auth_required with failing refresh still surfaces ADO
 
 // --- Gate 2: NO_USER_SESSION (file missing) ---
 test("adoptLegacy service: missing user session throws NO_USER_SESSION", async () => {
-  await withHome(
+  await withHome("http://127.0.0.1:1",
     async () => {
       await assert.rejects(
         () =>
@@ -561,7 +561,7 @@ test("adoptLegacy service: missing user session throws NO_USER_SESSION", async (
 
 // --- Gate 3: INVALID_USER_SESSION (file present but malformed) ---
 test("adoptLegacy service: invalid user session shape throws INVALID_USER_SESSION", async () => {
-  await withHome(
+  await withHome("http://127.0.0.1:1",
     async () => {
       await assert.rejects(
         () =>
@@ -586,7 +586,7 @@ test("adoptLegacy service: invalid user session shape throws INVALID_USER_SESSIO
 
 // --- Gate 4: ADOPT_NOT_AUTHORIZED for empty slug AND for server 403 ---
 test("adoptLegacy service: empty server slug throws ADOPT_NOT_AUTHORIZED", async () => {
-  await withHome(async () => {
+  await withHome("http://127.0.0.1:1", async () => {
     await assert.rejects(
       () =>
         adoptLegacy({
@@ -607,10 +607,10 @@ test("adoptLegacy service: empty server slug throws ADOPT_NOT_AUTHORIZED", async
 });
 
 test("adoptLegacy service: 403 from server throws ADOPT_NOT_AUTHORIZED + appends failure log", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 403, body: { code: "not_authorized" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 403, body: { code: "not_authorized" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -641,10 +641,10 @@ test("adoptLegacy service: 403 from server throws ADOPT_NOT_AUTHORIZED + appends
 });
 
 test("adoptLegacy service: unknown 403 stays unexpected instead of fabricating ADOPT_NOT_AUTHORIZED", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 403, body: { code: "edge_policy_denied" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 403, body: { code: "edge_policy_denied" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -672,10 +672,10 @@ test("adoptLegacy service: unknown 403 stays unexpected instead of fabricating A
 });
 
 test("adoptLegacy service: code-less 403 stays unexpected instead of fabricating ADOPT_NOT_AUTHORIZED", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 403, body: null },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 403, body: null },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -703,10 +703,10 @@ test("adoptLegacy service: code-less 403 stays unexpected instead of fabricating
 });
 
 test("adoptLegacyByDaemonId service: typed missing row is actionable and writes no Computer state", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 404, body: { code: "legacy_machine_not_found" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 404, body: { code: "legacy_machine_not_found" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -735,10 +735,10 @@ test("adoptLegacyByDaemonId service: typed missing row is actionable and writes 
 // for a member who lacks manageMachines — even with raw legacy-key possession.
 // Distinct from `not_authorized` so the caller renders "ask an admin".
 test("adoptLegacy service: 403 requires_admin throws ADOPT_REQUIRES_ADMIN + appends failure log", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 403, body: { code: "requires_admin" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 403, body: { code: "requires_admin" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -767,10 +767,10 @@ test("adoptLegacy service: 403 requires_admin throws ADOPT_REQUIRES_ADMIN + appe
 
 // --- Gate 5: ADOPT_DISABLED (404) + failure log ---
 test("adoptLegacy service: 404 throws ADOPT_DISABLED + appends failure log", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 404, body: {} },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 404, body: {} },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -800,10 +800,10 @@ test("adoptLegacy service: 404 throws ADOPT_DISABLED + appends failure log", asy
 // --- Gate 6: LEGACY_KEY_INVALID (401 legacy_key_invalid) — preserves
 // owner-evidence in message + appends failure log ---
 test("adoptLegacy service: server legacy_key_invalid throws LEGACY_KEY_INVALID with owner evidence + log", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 401, body: { code: "legacy_key_invalid" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 401, body: { code: "legacy_key_invalid" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await seedLegacyOwnerFile(
         home,
@@ -847,10 +847,10 @@ test("adoptLegacy service: server legacy_key_invalid throws LEGACY_KEY_INVALID w
 // --- Gate 7: LEGACY_MACHINE_KEY_MIGRATED (409) + no preflight, no
 // runner.state.json, failure log ---
 test("adoptLegacy service: legacy_machine_key_migrated → fail-before-preflight, no runner.state.json, log failure", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 409, body: { code: "legacy_machine_key_migrated" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 409, body: { code: "legacy_machine_key_migrated" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -887,10 +887,10 @@ test("adoptLegacy service: legacy_machine_key_migrated → fail-before-preflight
 
 // --- Gate 8: ADOPT_AUTH_REQUIRED (401 auth_required) — login guidance ---
 test("adoptLegacy service: 401 auth_required throws ADOPT_AUTH_REQUIRED with login guidance", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 401, body: { code: "auth_required" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 401, body: { code: "auth_required" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -922,10 +922,10 @@ test("adoptLegacy service: 401 auth_required throws ADOPT_AUTH_REQUIRED with log
 // --- Gate 9: ADOPT_UNEXPECTED_RESPONSE (401 missing code) carries
 // http_status + login hint ---
 test("adoptLegacy service: 401 with no code throws ADOPT_UNEXPECTED_RESPONSE w/ login hint", async () => {
-  await withHome(async () => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 401, body: { error: "Invalid or expired token" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 401, body: { error: "Invalid or expired token" } },
+  });
+  await withHome(ctx.baseUrl, async () => {
     try {
       await assert.rejects(
         () =>
@@ -954,10 +954,10 @@ test("adoptLegacy service: 401 with no code throws ADOPT_UNEXPECTED_RESPONSE w/ 
 
 // --- Gate 10: ADOPT_FAILED (generic unrecognized server error) ---
 test("adoptLegacy service: generic 500 throws ADOPT_FAILED carrying the code + log", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      adopt: { status: 500, body: { code: "internal_adopt_error" } },
-    });
+  const ctx = await startAdoptServer({
+    adopt: { status: 500, body: { code: "internal_adopt_error" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -986,10 +986,10 @@ test("adoptLegacy service: generic 500 throws ADOPT_FAILED carrying the code + l
 // --- Gate 11: PREFLIGHT_FAILED — fail-closed: zero runner.state.json
 // residue + adoption.log preflight_<code> failure line ---
 test("adoptLegacy service: preflight failure → PREFLIGHT_FAILED + zero runner.state.json residue + log preflight_<code>", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({
-      preflight: { status: 500, body: { ok: false, code: "internal" } },
-    });
+  const ctx = await startAdoptServer({
+    preflight: { status: 500, body: { ok: false, code: "internal" } },
+  });
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await assert.rejects(
         () =>
@@ -1026,8 +1026,8 @@ test("adoptLegacy service: preflight failure → PREFLIGHT_FAILED + zero runner.
 // fail-closed (no runner.state.json), failure log carries legacy_stop_*
 // fields. ---
 test("adoptLegacy service: unparseable owner.json → LEGACY_DAEMON_STOP_FAILED, fail-closed, log legacy_stop_error", async () => {
-  await withHome(async (home) => {
-    const ctx = await startAdoptServer({});
+  const ctx = await startAdoptServer({});
+  await withHome(ctx.baseUrl, async (home) => {
     try {
       await seedLegacyOwnerFile(home, LEGACY_KEY, "{not valid json");
       await assert.rejects(
@@ -1064,7 +1064,7 @@ test("adoptLegacy service: unparseable owner.json → LEGACY_DAEMON_STOP_FAILED,
 
 // --- Gate 13: AbortSignal cancels before the network call ---
 test("adoptLegacy service: pre-aborted AbortSignal throws AbortError, not ComputerServiceError", async () => {
-  await withHome(async () => {
+  await withHome("http://127.0.0.1:1", async () => {
     const ac = new AbortController();
     ac.abort();
     await assert.rejects(
@@ -1099,7 +1099,7 @@ test("adoptLegacy service: legacyLockOwnerPath derives SHA-256(rawKey)[0..15] un
 // --- Gate 15: appendAdoptionLog moved into service byte-identical
 // (snake_case fields, redacted prefix, no raw key, 0o600). ---
 test("adoptLegacy service: appendAdoptionLog writes snake_case fields, no raw key, 0o600", async () => {
-  await withHome(async (home) => {
+  await withHome("http://127.0.0.1:1", async (home) => {
     await appendAdoptionLog(home, {
       mode: "legacy_key_argv",
       redactedPrefix: LEGACY_PREFIX,

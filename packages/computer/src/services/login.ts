@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl, isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 // LoginService — Computer domain service seam for user identity (RFC v0.8
 // contract v3 §6, "device-code login"). CLI and Electron main are both
 // adapters over this surface; the service itself never touches
@@ -216,6 +217,7 @@ async function runDeviceCodeFlow(
   // the code lets someone get a person to approve their login in one click.
   // The person types the code shown here.
   const verifyUrl = new URL(authorization.verificationUri, baseUrl).toString();
+  assertPrivacyServiceUrl(verifyUrl);
   const expiresAt = new Date(Date.now() + authorization.expiresIn * 1000).toISOString();
   emit(options, {
     kind: "login.device-code",
@@ -512,6 +514,7 @@ export function acceptableApprovalUrl(raw: string, baseUrl: string): string | nu
     return null;
   }
   if (url.username || url.password || url.hash) return null;
+  if (privacyModeEnabled() && isRaftVendorUrl(url)) return null;
   if (url.pathname !== "/login/device") return null;
   const localBase = base.hostname === "localhost" || base.hostname === "127.0.0.1" || base.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && localBase && url.hostname === base.hostname)) return null;

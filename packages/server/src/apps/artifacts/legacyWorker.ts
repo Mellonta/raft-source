@@ -46,6 +46,7 @@
 //
 // The token never reaches a log; a failed call is logged with its status or
 // error class only.
+import { assertPrivacyServiceUrl, isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { z } from "zod";
 import type { ServerId } from "@botiverse/raft-shared";
 
@@ -98,6 +99,7 @@ let configMemo: { raw: string; config: LegacyWorkerConfig | null } | null = null
  */
 export function legacyWorkerConfig(env: NodeJS.ProcessEnv = process.env): LegacyWorkerConfig | null {
   const url = env.ARTIFACTS_LEGACY_IMPORT_URL?.trim() ?? "";
+  if (privacyModeEnabled(env) && URL.canParse(url) && isRaftVendorUrl(new URL(url))) return null;
   const token = env.ARTIFACTS_LEGACY_IMPORT_TOKEN?.trim() ?? "";
   const others = OTHER_SECRETS.flatMap((name) => (env[name] ?? "").split(",").map((value) => value.trim()).filter(Boolean));
   const raw = JSON.stringify([url, token, others]);
@@ -173,6 +175,7 @@ async function call(
   const url = new URL(`${config.base}/internal/raft-import/${path}`);
   for (const [key, value] of Object.entries(init.query ?? {})) url.searchParams.set(key, value);
   try {
+    assertPrivacyServiceUrl(url);
     return await (fetchImpl ?? fetch)(url.toString(), {
       method: init.method,
       headers: {

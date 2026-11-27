@@ -1016,7 +1016,7 @@ const { role } = await s.membership();                // their role there, now
 - Fields keep the endpoints' wire names (the OIDC claim names), as in the
   public guide. `is_paid` / `plan_tier` absent means unknown: never grant a
   paid entitlement on it, never show a paid wall on it.
-- `baseUrl` defaults to `https://api.raft.build` (a trailing slash is fine) and must use HTTPS; plain HTTP is accepted only for `localhost`, `127.0.0.1` and `[::1]` (a local dev server), since the access token goes on every request. Requests never follow a redirect;
+- With `RAFT_PRIVACY_MODE=1` (or the client option `privacyMode: true`), supply your own non-vendor `baseUrl`. Otherwise `baseUrl` defaults to `https://api.raft.build` (a trailing slash is fine) and must use HTTPS; plain HTTP is accepted only for `localhost`, `127.0.0.1` and `[::1]` (a local dev server), since the access token goes on every request. Requests never follow a redirect;
   `fetch` defaults to the global one, so pass your own for timeouts or a proxy.
 
 Every failure is a `RaftAppError` with a stable `code`. Its `message` is the
